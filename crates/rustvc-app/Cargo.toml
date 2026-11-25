@@ -1,0 +1,24 @@
+[package]
+name = "voice-changer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "Real-time open-source voice changer"
+
+[[bin]]
+name = "voice-changer"
+path = "src/main.rs"
+
+[features]
+default = []
+onnx = ["rustvc-infer/onnx"]
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+rustvc-audio = { path = "../rustvc-audio" }
+rustvc-infer = { path = "../rustvc-infer" }
+rustvc-train = { path = "../rustvc-train" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"

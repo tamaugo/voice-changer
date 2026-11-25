@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+voice-changer.toml
+voices/**
+!voices/.gitkeep
+*.wav
+.venv
+__pycache__/
+*.pyc
+logs/
