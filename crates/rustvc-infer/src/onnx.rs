@@ -13,9 +13,8 @@
 //! * `f0.onnx` — 16 kHz waveform in, fundamental frequency in hertz out
 //! * `synthesizer.onnx` — the RVC generator
 //!
-//! Retrieval (faiss) is not applied here. `index_rate` is recorded on the
-//! manifest and honored by the Python trainer's index file, but blending the
-//! index into live features still has to be wired up.
+//! Retrieval uses `features.npy` when the exporter wrote one. It is a
+//! brute-force neighbour blend, not a faiss index scan.
 
 use std::path::{Path, PathBuf};
 
@@ -23,6 +22,7 @@ use ndarray::{Array2, Array3, ArrayD};
 use ort::session::Session;
 use ort::value::TensorRef;
 
+use crate::dsp::{protect_features, retrieve, FeatureBank};
 use crate::model::InferParams;
 use crate::pitch::{coarse_f0, shift_hz};
 use crate::voices::VoiceRecord;
@@ -77,8 +77,19 @@ impl OnnxSessions {
         })
     }
 
-    pub fn run(&mut self, audio_16k: &[f32], params: &InferParams) -> Result<Vec<f32>, String> {
-        let features = run_content(&mut self.content, audio_16k, params.feature_dim())?;
+    pub fn run(
+        &mut self,
+        audio_16k: &[f32],
+        params: &InferParams,
+        bank: Option<&FeatureBank>,
+    ) -> Result<Vec<f32>, String> {
+        let mut features = run_content(&mut self.content, audio_16k, params.feature_dim())?;
+        let original = features.clone();
+        if let Some(bank) = bank {
+            if let Some(flat) = features.as_slice_mut() {
+                retrieve(flat, bank, params.index_rate, 8);
+            }
+        }
         let (coarse, continuous) = if params.f0 {
             let f0 = self.f0.as_mut().ok_or("f0 session missing")?;
             let hz = run_f0(f0, audio_16k)?;
@@ -86,13 +97,21 @@ impl OnnxSessions {
                 .into_iter()
                 .map(|hz| shift_hz(hz, params.pitch_semitones))
                 .collect();
+            if let (Some(converted), Some(source)) = (features.as_slice_mut(), original.as_slice())
+            {
+                protect_features(
+                    converted,
+                    source,
+                    &continuous,
+                    params.feature_dim(),
+                    params.protect,
+                );
+            }
             let coarse: Vec<i64> = continuous.iter().copied().map(coarse_f0).collect();
             (coarse, continuous)
         } else {
             (Vec::new(), Vec::new())
         };
-        // index_rate is intentionally unused until a faiss binding is added.
-        let _ = params.index_rate;
         run_synthesizer(
             &mut self.synthesizer,
             &features,

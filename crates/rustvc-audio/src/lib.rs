@@ -5,14 +5,16 @@
 //! model itself. It pulls a block off the capture ring, asks the processor
 //! for samples, and pushes the result to the playback ring.
 
+mod drift;
 mod engine;
 mod resample;
 
+pub use drift::DriftResampler;
 pub use engine::{
     list_devices, run_offline, self_test, virtual_output_hint, AudioEngine, DeviceList,
     EngineConfig, EngineStatus, Passthrough, SampleProcessor,
 };
-pub use resample::resample_mono;
+pub use resample::{resample_mono, BlockResampler};
 
 use std::time::Duration;
 

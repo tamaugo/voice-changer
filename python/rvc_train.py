@@ -53,19 +53,38 @@ def count_audio(dataset: Path) -> int:
     return sum(1 for path in dataset.iterdir() if path.suffix.lower() in AUDIO_SUFFIXES)
 
 
-def write_manifest(voices_dir: Path, name: str, args: argparse.Namespace, trained: bool, note: str, model: str = "", index: str = "") -> Path:
+def write_manifest(
+    voices_dir: Path,
+    name: str,
+    args: argparse.Namespace,
+    trained: bool,
+    note: str,
+    model: str = "",
+    index: str = "",
+    content_model: str = "",
+    f0_model: str = "",
+    features: str = "",
+) -> Path:
     destination = voices_dir / name.replace(" ", "_")
     destination.mkdir(parents=True, exist_ok=True)
-    model_name = Path(model).name if model else ""
-    index_name = Path(index).name if index else ""
-    if model:
-        target = destination / model_name
-        if Path(model).resolve() != target.resolve():
-            shutil.copy2(model, target)
-    if index:
-        target = destination / index_name
-        if Path(index).resolve() != target.resolve():
-            shutil.copy2(index, target)
+
+    def local_name(source: str) -> str:
+        if not source:
+            return ""
+        source_path = Path(source)
+        if not source_path.is_file():
+            return source_path.name
+        target = destination / source_path.name
+        if source_path.resolve() != target.resolve():
+            shutil.copy2(source_path, target)
+        return target.name
+
+    model_name = local_name(model)
+    index_name = local_name(index)
+    content_name = local_name(content_model)
+    f0_name = local_name(f0_model)
+    feature_name = local_name(features)
+    note = note.replace('"', "'")
     lines = [
         f'name = "{args.name}"',
         f'version = "{args.version}"',
@@ -76,8 +95,12 @@ def write_manifest(voices_dir: Path, name: str, args: argparse.Namespace, traine
         'f0_method = "rmvpe"',
         f'model = "{model_name}"',
         f'index = "{index_name}"',
-        'content_model = ""',
-        'f0_model = ""',
+        f'content_model = "{content_name}"',
+        f'f0_model = "{f0_name}"',
+        f'features = "{feature_name}"',
+        "rms_mix = 0.25",
+        "protect = 0.33",
+        "crossfade_ms = 10.0",
         f"trained = {'true' if trained else 'false'}",
         f'note = "{note}"',
         "",
@@ -337,17 +360,67 @@ def train(args: argparse.Namespace) -> None:
     if checkpoint is None:
         fail(f"training finished but no .pth checkpoint was found for {safe_name}")
     index = find_index(root, safe_name)
+    voice_dir = voices_dir / safe_name
+    voice_dir.mkdir(parents=True, exist_ok=True)
+    export_note = export_checkpoint(root, checkpoint, voice_dir, args.version, args.f0, safe_name)
+    content = voice_dir / "content.onnx"
+    synthesizer = voice_dir / "synthesizer.onnx"
+    f0_file = voice_dir / "f0.onnx"
+    features = voice_dir / "features.npy"
+    exported = synthesizer.is_file() and content.is_file()
     manifest = write_manifest(
         voices_dir,
         safe_name,
         args,
         trained=True,
-        note="Trained with the RVC WebUI CLI. Export synthesizer.onnx, content.onnx, and f0.onnx for live ONNX inference.",
-        model=str(checkpoint),
+        note=export_note if exported else f"Trained. {export_note}",
+        model=str(synthesizer if exported else checkpoint),
         index=str(index) if index else "",
+        content_model=str(content) if content.is_file() else "",
+        f0_model=str(f0_file) if f0_file.is_file() else "",
+        features=str(features) if features.is_file() else "",
     )
     progress(1.0, "training finished")
     emit("VOICE", str(manifest))
+
+
+def export_checkpoint(root: Path, checkpoint: Path, voice_dir: Path, version: str, f0: bool, name: str) -> str:
+    script = Path(__file__).resolve().parent / "export_onnx.py"
+    if not script.is_file():
+        return "ONNX export script is missing."
+    progress(0.95, "export ONNX")
+    command = [
+        sys.executable,
+        str(script),
+        "--rvc-root",
+        str(root),
+        "--checkpoint",
+        str(checkpoint),
+        "--out-dir",
+        str(voice_dir),
+        "--version",
+        version,
+        "--name",
+        name,
+        "--f0" if f0 else "--no-f0",
+    ]
+    emit("LOG", " ".join(command))
+    process = subprocess.Popen(
+        command,
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    for line in process.stdout:
+        stripped = line.rstrip()
+        if stripped:
+            emit("LOG", stripped)
+    code = process.wait()
+    if code != 0:
+        return f"ONNX export failed with status {code}. The .pth is still in the voice folder."
+    return "Trained and exported to ONNX. Select the voice with a binary built --features onnx."
 
 
 def parse_args() -> argparse.Namespace:

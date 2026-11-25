@@ -37,6 +37,7 @@ struct AppConfig {
     output_device: String,
     sample_rate: u32,
     block_frames: usize,
+    callback_frames: u32,
     gpu_budget_percent: u8,
     inference: String,
     cuda_device: i32,
@@ -54,6 +55,7 @@ impl Default for AppConfig {
             output_device: String::new(),
             sample_rate: 48_000,
             block_frames: 4_800,
+            callback_frames: 480,
             gpu_budget_percent: 5,
             inference: "cuda".to_string(),
             cuda_device: 0,
@@ -112,6 +114,7 @@ struct VoiceApp {
     progress_message: String,
     log: String,
     train_error: Option<String>,
+    benchmark: String,
 }
 
 impl VoiceApp {
@@ -137,6 +140,7 @@ impl VoiceApp {
             progress_message: String::new(),
             log: String::new(),
             train_error: None,
+            benchmark: String::new(),
         }
     }
 
@@ -452,6 +456,7 @@ impl VoiceApp {
             self.screen = Screen::Dashboard;
             return;
         }
+        egui::ScrollArea::vertical().show(ui, |ui| {
         ui.label(
             egui::RichText::new(
                 "Playback should be a virtual cable input, such as \"CABLE Input\". Discord then uses the cable output as its microphone. No kernel driver is installed by this app.",
@@ -497,6 +502,12 @@ impl VoiceApp {
                     480..=19200,
                 ));
                 ui.end_row();
+                ui.label("Callback frames");
+                ui.add(egui::Slider::new(
+                    &mut self.config.callback_frames,
+                    128..=2048,
+                ));
+                ui.end_row();
                 ui.label("GPU budget %");
                 ui.add(egui::Slider::new(
                     &mut self.config.gpu_budget_percent,
@@ -533,14 +544,56 @@ impl VoiceApp {
             self.reload_voices();
             self.restart_audio();
         }
+        ui.add_space(12.0);
+        if ui
+            .button("Benchmark GPU duty")
+            .on_hover_text("Times the selected voice over a few blocks. Run this on the RTX 5070.")
+            .clicked()
+        {
+            self.benchmark = run_benchmark(&self.config, &self.voices);
+        }
+        if !self.benchmark.is_empty() {
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(&self.benchmark).color(TEXT));
+        }
         ui.add_space(8.0);
         ui.label(
             egui::RichText::new(
-                "Live inference is built to stay near the GPU budget by running one short ONNX burst per audio block. Training uses the whole GPU and ignores the budget. CUDA on an RTX 5070 needs ONNX Runtime and PyTorch builds made with CUDA 12.8 or newer (sm_120).",
+                "Live inference stays near the GPU budget by running one short ONNX burst per audio block. Callback frames is the WASAPI buffer when the device publishes a size range. Training uses the whole GPU and ignores the budget. CUDA on an RTX 5070 needs ONNX Runtime and PyTorch builds made with CUDA 12.8 or newer (sm_120).",
             )
             .color(MUTED),
         );
+        });
     }
+}
+
+fn run_benchmark(config: &AppConfig, voices: &[VoiceRecord]) -> String {
+    let rate = config.sample_rate.max(1);
+    let block = config.block_frames.max(1);
+    let mut model = match voices
+        .iter()
+        .find(|voice| voice.manifest.name == config.selected_voice)
+    {
+        Some(record) => {
+            let dll = optional_path(&config.onnx_dll);
+            VoiceModel::load(
+                record.manifest.clone(),
+                &record.directory,
+                rate,
+                InferDevice::parse(&config.inference, config.cuda_device),
+                dll.as_deref(),
+            )
+        }
+        None => VoiceModel::passthrough(rate),
+    };
+    let report = rustvc_infer::measure_duty(
+        |input| model.process(input),
+        rate,
+        block,
+        12,
+        config.gpu_budget_percent,
+    );
+    format!("{} — {}", model.label(), report.summary())
 }
 
 pub fn run() -> eframe::Result<()> {
@@ -709,6 +762,7 @@ fn engine_config(config: &AppConfig) -> EngineConfig {
         output_device: config.output_device.clone(),
         sample_rate: config.sample_rate,
         block_frames: config.block_frames.max(1),
+        callback_frames: config.callback_frames.max(32),
     }
 }
 
@@ -752,6 +806,38 @@ fn optional_path(value: &str) -> Option<PathBuf> {
 
 fn config_path() -> PathBuf {
     PathBuf::from("voice-changer.toml")
+}
+
+pub fn benchmark_voice(voice_name: &str, seconds: f32) -> Result<String, String> {
+    let config = load_config();
+    let voices = load_voices(Path::new(&config.voices_dir));
+    let rate = config.sample_rate.max(1);
+    let block = config.block_frames.max(1);
+    let mut model = if voice_name == "Passthrough" {
+        VoiceModel::passthrough(rate)
+    } else {
+        let record = voices
+            .iter()
+            .find(|voice| voice.manifest.name == voice_name)
+            .ok_or_else(|| format!("no voice named {voice_name} in {}", config.voices_dir))?;
+        let dll = optional_path(&config.onnx_dll);
+        VoiceModel::load(
+            record.manifest.clone(),
+            &record.directory,
+            rate,
+            InferDevice::parse(&config.inference, config.cuda_device),
+            dll.as_deref(),
+        )
+    };
+    let blocks = ((seconds * rate as f32) / block as f32).round().max(1.0) as usize;
+    let report = rustvc_infer::measure_duty(
+        |input| model.process(input),
+        rate,
+        block,
+        blocks,
+        config.gpu_budget_percent,
+    );
+    Ok(format!("{}\n{}", model.label(), report.summary()))
 }
 
 fn load_config() -> AppConfig {

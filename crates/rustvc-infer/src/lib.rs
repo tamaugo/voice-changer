@@ -9,14 +9,20 @@
 //! retrieval blend, F0 in hertz plus a coarse 1..=255 bin, then the
 //! synthesizer. so-vits-svc and the unlicensed obs-rvc tree are not linked.
 
+mod bench;
 mod budget;
+#[cfg_attr(not(feature = "onnx"), allow(dead_code))]
+mod dsp;
 mod model;
+#[cfg_attr(not(feature = "onnx"), allow(dead_code))]
+mod npy;
 mod pitch;
 mod voices;
 
 #[cfg(feature = "onnx")]
 mod onnx;
 
+pub use bench::{measure_duty, DutyReport};
 pub use budget::{duty_cycle_percent, GpuBudget};
 pub use model::{InferDevice, VoiceModel};
 pub use pitch::{coarse_f0, shift_hz};
@@ -77,6 +83,10 @@ pub fn self_test() -> Result<(), String> {
     let input = [0.25f32, -0.5, 0.0];
     if passthrough_samples(&passthrough, &input) != input {
         return Err("unloaded voice model did not pass audio through".into());
+    }
+    let report = measure_duty(|samples| samples.to_vec(), 48_000, 4_800, 4, 5);
+    if !report.inside_budget {
+        return Err(report.summary());
     }
     Ok(())
 }

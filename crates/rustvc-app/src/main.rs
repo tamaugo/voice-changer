@@ -16,7 +16,9 @@ use rustvc_train::{find_script, TrainEvent, TrainHandle, TrainRequest};
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("voice-changer\n  --self-test     run the offline audio, pitch, and training checks\n  --list-devices  print capture and playback devices");
+        println!(
+            "voice-changer\n  --self-test       run the offline audio, pitch, and training checks\n  --list-devices    print capture and playback devices\n  --benchmark       time the live hook and print the GPU duty cycle\n  --voice NAME      voice to benchmark (default: Passthrough)\n  --seconds N       benchmark length in seconds (default: 3)"
+        );
         return;
     }
     if args.iter().any(|arg| arg == "--list-devices") {
@@ -33,6 +35,13 @@ fn main() {
         );
         return;
     }
+    if args.iter().any(|arg| arg == "--benchmark") {
+        if let Err(err) = benchmark(&args) {
+            eprintln!("benchmark failed: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.iter().any(|arg| arg == "--self-test") {
         if let Err(err) = self_test() {
             eprintln!("self-test failed: {err}");
@@ -45,6 +54,27 @@ fn main() {
         eprintln!("failed to open the window: {err}");
         std::process::exit(1);
     }
+}
+
+fn benchmark(args: &[String]) -> Result<(), String> {
+    let seconds = flag_value(args, "--seconds")
+        .and_then(|value| value.parse::<f32>().ok())
+        .unwrap_or(3.0)
+        .clamp(0.5, 30.0);
+    let voice_name = flag_value(args, "--voice").unwrap_or("Passthrough");
+    let summary = ui::benchmark_voice(voice_name, seconds)?;
+    println!("{summary}");
+    println!(
+        "On an RTX 5070 this duty cycle is the ceiling for average GPU use during the burst. A small ONNX graph usually shows a lower Task Manager reading."
+    );
+    Ok(())
+}
+
+fn flag_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|arg| arg == name)
+        .and_then(|index| args.get(index + 1))
+        .map(String::as_str)
 }
 
 fn self_test() -> Result<(), String> {

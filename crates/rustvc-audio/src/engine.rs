@@ -12,11 +12,15 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, SampleFormat, Stream, StreamConfig, SupportedStreamConfig};
+use cpal::{
+    BufferSize, Device, SampleFormat, Stream, StreamConfig, SupportedBufferSize,
+    SupportedStreamConfig,
+};
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::HeapRb;
 
-use crate::resample::{resample_mono, ResampleError};
+use crate::drift::DriftResampler;
+use crate::resample::resample_mono;
 
 /// Installed into the live loop. Return one output sample per input sample
 /// when you can. The engine queues extras and pads a shortfall with silence
@@ -51,6 +55,10 @@ pub struct EngineConfig {
     pub sample_rate: u32,
     /// Samples per processing block, at the capture rate.
     pub block_frames: usize,
+    /// WASAPI/shared-mode callback quantum, in frames. Used when the device
+    /// advertises a buffer-size range that contains it. 480 frames is 10 ms
+    /// at 48 kHz.
+    pub callback_frames: u32,
 }
 
 impl Default for EngineConfig {
@@ -60,6 +68,7 @@ impl Default for EngineConfig {
             output_device: String::new(),
             sample_rate: 48_000,
             block_frames: 4_800,
+            callback_frames: 480,
         }
     }
 }
@@ -219,6 +228,7 @@ struct Opened {
     underruns: Arc<AtomicU64>,
     input_rate: u32,
     output_rate: u32,
+    playback_capacity: usize,
 }
 
 fn open_streams(
@@ -254,8 +264,9 @@ fn open_streams(
     let capacity = (input_rate as usize * 4)
         .max(config.block_frames * 8)
         .max(1024);
+    let playback_capacity = capacity * 2;
     let capture_rb = HeapRb::<f32>::new(capacity);
-    let playback_rb = HeapRb::<f32>::new(capacity * 2);
+    let playback_rb = HeapRb::<f32>::new(playback_capacity);
     let (capture_prod, capture_cons) = capture_rb.split();
     let (playback_prod, playback_cons) = playback_rb.split();
 
@@ -267,6 +278,7 @@ fn open_streams(
         input_channels,
         capture_prod,
         Arc::clone(&overflows),
+        config.callback_frames,
     )?;
     let output_stream = build_output(
         &output_device,
@@ -274,6 +286,7 @@ fn open_streams(
         output_channels,
         playback_cons,
         Arc::clone(&underruns),
+        config.callback_frames,
     )?;
     input_stream
         .play()
@@ -302,6 +315,7 @@ fn open_streams(
         underruns,
         input_rate,
         output_rate,
+        playback_capacity,
     })
 }
 
@@ -315,6 +329,7 @@ fn run_loop(
 ) {
     let mut scratch = vec![0.0f32; block];
     let mut pending: Vec<f32> = Vec::new();
+    let mut drift = DriftResampler::new(opened.input_rate, opened.output_rate, block).ok();
     while !stop.load(Ordering::Relaxed) {
         while let Ok(command) = commands.try_recv() {
             match command {
@@ -337,15 +352,20 @@ fn run_loop(
         let produced = processor.process(&scratch[..read]);
         let elapsed = started.elapsed();
         let aligned = take_aligned(&mut pending, &produced, read);
-        match adapt_rate(&aligned, opened.input_rate, opened.output_rate) {
-            Ok(playback) => {
-                let _ = opened.playback.push_slice(&playback);
+        let playback = match drift.as_mut() {
+            Some(resampler) => {
+                let fill = opened.playback.occupied_len();
+                match resampler.process(&aligned, fill, opened.playback_capacity) {
+                    Ok(samples) => samples,
+                    Err(err) => {
+                        status.lock().expect("audio status").error = Some(err.to_string());
+                        aligned
+                    }
+                }
             }
-            Err(err) => {
-                status.lock().expect("audio status").error = Some(err.to_string());
-                let _ = opened.playback.push_slice(&aligned);
-            }
-        }
+            None => aligned,
+        };
+        let _ = opened.playback.push_slice(&playback);
 
         let block_ms = read as f32 * 1000.0 / opened.input_rate.max(1) as f32;
         let process_ms = elapsed.as_secs_f32() * 1000.0;
@@ -362,13 +382,6 @@ fn run_loop(
         state.output_underruns = opened.underruns.load(Ordering::Relaxed);
         state.running = true;
     }
-}
-
-fn adapt_rate(samples: &[f32], from_sr: u32, to_sr: u32) -> Result<Vec<f32>, ResampleError> {
-    if from_sr == to_sr {
-        return Ok(samples.to_vec());
-    }
-    resample_mono(samples, from_sr, to_sr)
 }
 
 /// Queue `produced` and return exactly `frames` samples at the capture rate.
@@ -415,8 +428,9 @@ fn build_input(
     channels: usize,
     prod: ringbuf::HeapProd<f32>,
     overflows: Arc<AtomicU64>,
+    callback_frames: u32,
 ) -> Result<Stream, String> {
-    let stream_config = config.config();
+    let stream_config = stream_config_with_buffer(config, callback_frames);
     match config.sample_format() {
         SampleFormat::F32 => {
             open_input::<f32, _>(device, stream_config, channels, prod, overflows, |sample| {
@@ -477,8 +491,9 @@ fn build_output(
     channels: usize,
     cons: ringbuf::HeapCons<f32>,
     underruns: Arc<AtomicU64>,
+    callback_frames: u32,
 ) -> Result<Stream, String> {
-    let stream_config = config.config();
+    let stream_config = stream_config_with_buffer(config, callback_frames);
     match config.sample_format() {
         SampleFormat::F32 => {
             open_output::<f32, _>(device, stream_config, channels, cons, underruns, |sample| {
@@ -535,6 +550,20 @@ where
             None,
         )
         .map_err(|err| format!("open output: {err}"))
+}
+
+/// Request a fixed shared-mode quantum when the device publishes a range.
+/// WASAPI uses this as the callback buffer. A device that does not publish a
+/// range keeps `BufferSize::Default`, which is the mix-format period.
+fn stream_config_with_buffer(config: &SupportedStreamConfig, requested: u32) -> StreamConfig {
+    let mut stream = config.config();
+    stream.buffer_size = match config.buffer_size() {
+        SupportedBufferSize::Range { min, max } => {
+            BufferSize::Fixed(requested.max(32).clamp(*min, *max))
+        }
+        SupportedBufferSize::Unknown => BufferSize::Default,
+    };
+    stream
 }
 
 /// Run `input` through `processor` with the same block alignment as the live

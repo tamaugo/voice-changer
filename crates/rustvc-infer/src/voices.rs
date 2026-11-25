@@ -36,6 +36,17 @@ pub struct VoiceManifest {
     pub trained: bool,
     #[serde(default)]
     pub note: String,
+    /// Brute-force retrieval bank written by the exporter (`features.npy`).
+    #[serde(default)]
+    pub features: String,
+    /// 0 leaves the converted loudness alone. 1 matches the input envelope.
+    #[serde(default = "default_rms_mix")]
+    pub rms_mix: f32,
+    /// Consonant protection, 0 to 0.5. Unvoiced frames keep more of the original features.
+    #[serde(default = "default_protect")]
+    pub protect: f32,
+    #[serde(default = "default_crossfade_ms")]
+    pub crossfade_ms: f32,
 }
 
 fn default_version() -> String {
@@ -52,6 +63,15 @@ fn default_index_rate() -> f32 {
 }
 fn default_f0_method() -> String {
     "rmvpe".to_string()
+}
+fn default_rms_mix() -> f32 {
+    0.25
+}
+fn default_protect() -> f32 {
+    0.33
+}
+fn default_crossfade_ms() -> f32 {
+    10.0
 }
 
 impl Default for VoiceManifest {
@@ -70,6 +90,10 @@ impl Default for VoiceManifest {
             f0_model: String::new(),
             trained: false,
             note: String::new(),
+            features: String::new(),
+            rms_mix: default_rms_mix(),
+            protect: default_protect(),
+            crossfade_ms: default_crossfade_ms(),
         }
     }
 }
@@ -94,10 +118,11 @@ impl VoiceRecord {
         full.is_file().then_some(full)
     }
 
-    /// Synthesizer checkpoint, either the manifest path or `synthesizer.onnx`.
+    /// Synthesizer checkpoint. An exported ONNX file wins over a `.pth`.
     pub fn synthesizer(&self) -> Option<PathBuf> {
-        self.resolve(&self.manifest.model)
-            .or_else(|| existing(self.directory.join("synthesizer.onnx")))
+        existing(self.directory.join("synthesizer.onnx"))
+            .or_else(|| onnx_only(self.resolve(&self.manifest.model)))
+            .or_else(|| self.resolve(&self.manifest.model))
             .or_else(|| existing(self.directory.join("model.pth")))
     }
 
@@ -110,6 +135,15 @@ impl VoiceRecord {
         self.resolve(&self.manifest.f0_model)
             .or_else(|| existing(self.directory.join("f0.onnx")))
     }
+
+    pub fn features(&self) -> Option<PathBuf> {
+        self.resolve(&self.manifest.features)
+            .or_else(|| existing(self.directory.join("features.npy")))
+    }
+}
+
+fn onnx_only(path: Option<PathBuf>) -> Option<PathBuf> {
+    path.filter(|candidate| candidate.extension().and_then(|ext| ext.to_str()) == Some("onnx"))
 }
 
 fn existing(path: PathBuf) -> Option<PathBuf> {

@@ -2,7 +2,7 @@
 
 A free, open-source real-time voice changer. The app is Rust, the license is MIT, and the Windows build talks to the sound device through WASAPI. Live conversion is designed to leave the GPU almost idle so a game can keep the RTX 5070. Training is allowed to use the whole card.
 
-This repository is a working scaffold. Capture, a processor hook, and playback already run. The hook is a passthrough until an ONNX voice is loaded. Training launches the existing RVC command-line tools instead of reimplementing them.
+Capture, conversion, and playback run in one process. A voice is a folder of ONNX files exported from the MIT-licensed RVC WebUI. Until those files exist, the hook passes audio through and says why. Training and export shell out to that checkout instead of reimplementing it.
 
 ## Layout
 
@@ -12,7 +12,8 @@ This repository is a working scaffold. Capture, a processor hook, and playback a
 | `crates/rustvc-infer` | Voice manifests, the RVC pitch-bin contract, the GPU duty-cycle budget, optional ONNX Runtime sessions |
 | `crates/rustvc-train` | Spawns `python/rvc_train.py` and parses its progress protocol |
 | `crates/rustvc-app` | The dark window: pick a voice, train a voice, settings, close |
-| `python/rvc_train.py` | Original wrapper. It does not import RVC. It shells out to the RVC CLI, or dry-runs |
+| `python/rvc_train.py` | Original wrapper. It shells out to the RVC CLI, then to the exporter |
+| `python/export_onnx.py` | Imports the RVC checkout and writes `content.onnx`, `f0.onnx`, `synthesizer.onnx`, `features.npy` |
 
 ```text
 microphone --WASAPI--> ring buffer --processor hook--> ring buffer --WASAPI--> virtual cable input
@@ -101,7 +102,48 @@ cargo run -p voice-changer -- --list-devices
 
 `cargo check --target x86_64-pc-windows-msvc` is how the Windows build is type-checked from another OS. cpal selects WASAPI for that target. The check does not link a `.exe`; producing the binary still wants the MSVC linker on Windows.
 
-Python is only required for training. The live window runs without it.
+Python is only required for training and ONNX export. The live window runs without it once the `.onnx` files exist.
+
+## Try it on Windows
+
+1. Install Rust (stable, MSVC) and the Visual Studio C++ build tools.
+2. Install a driver that reports CUDA 12.8 or newer (`nvidia-smi`). An RTX 5070 needs this for `sm_120`.
+3. Install VB-CABLE if you want Discord to see the converted voice. In the app, set Output to `CABLE Input` and set Discord's microphone to `CABLE Output`.
+4. Clone the MIT RVC WebUI and install its CUDA 12.8 requirements, including PyTorch from the cu128 index:
+
+```text
+git clone https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI.git
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+pip install -r Retrieval-based-Voice-Conversion-WebUI\requirments_cu128_py312.txt
+```
+
+Download the HuBERT/ContentVec folder into `assets\hubert_base`, the RMVPE file into `assets\rmvpe\rmvpe.pt`, and the v2 pretrained generator/discriminator into `assets\pretrained_v2`, the same files the WebUI's own docs ask for.
+
+5. Build the converter with the ONNX feature and an ONNX Runtime DLL built with CUDA 12.8 or newer (ORT 1.21–1.26, or the CUDA 12.x package of 1.27+):
+
+```text
+cargo build -p voice-changer --release --features onnx
+set ORT_DYLIB_PATH=C:\path\to\onnxruntime.dll
+target\release\voice-changer.exe
+```
+
+6. In Settings, set Python, the RVC checkout path, and the ONNX Runtime DLL. Save.
+7. Train a voice: put wavs in one folder, open Train a voice, turn dry run off, and start. The trainer preprocesses, extracts F0 and HuBERT features, trains, builds the index, then `python/export_onnx.py` writes `content.onnx`, `f0.onnx`, `synthesizer.onnx`, and `features.npy` into `voices\<name>\`. The voice shows up in Pick a voice.
+8. To export a checkpoint you already have, without training again:
+
+```text
+python python\export_onnx.py --rvc-root C:\rvc --checkpoint C:\rvc\assets\weights\demo.pth --out-dir voices\demo --version v2 --name demo
+```
+
+9. Confirm the live GPU budget on the 5070:
+
+```text
+voice-changer.exe --benchmark --voice YourVoice --seconds 5
+```
+
+Settings also has Benchmark GPU duty. The number is process time divided by the audio block. Under 5% means the burst fits the live target. Task Manager's GPU column is usually lower, because a small graph does not fill the chip for that whole burst.
+
+`voice-changer.exe --self-test` checks the audio loop, the pitch bins, retrieval/crossfade math, and a training dry run. It does not need a GPU.
 
 ## Virtual microphone
 
@@ -126,14 +168,18 @@ Voices are folders under `voices/` with a `voice.toml`. Passthrough is always av
 
 ## Live model contract
 
-When `synthesizer.onnx`, `content.onnx`, and (for F0 voices) `f0.onnx` are present and the binary was built with `--features onnx`, the hook does the following. The tensor names match the RVC generator inputs published by the MIT WebUI (`phone`, `phone_lengths`, `pitch`, `pitchf`, `ds`):
+When `synthesizer.onnx`, `content.onnx`, and (for F0 voices) `f0.onnx` are present and the binary was built with `--features onnx`, each block does the following. The synthesizer tensor names match the RVC generator inputs published by the MIT WebUI (`phone`, `phone_lengths`, `pitch`, `pitchf`, `ds`):
 
-1. Resample the block to 16 kHz.
+1. Keep about 300 ms of context, resample that window to 16 kHz with a reused FFT plan.
 2. Run the content encoder. v1 is 256-d, v2 is 768-d.
-3. Run the F0 model, shift by the semitone control (`2^(semitones/12)`), and quantize to bins 1..=255 between 50 Hz and 1100 Hz on the mel scale `1127 * ln(1 + hz/700)`.
-4. Run the synthesizer and resample back to the playback rate.
+3. If `features.npy` is present, blend each frame with its nearest training rows (brute-force L2, inverse-distance weights, `index_rate`). This is the faiss blend without linking faiss into the live process. The exporter fills the file from `total_fea.npy` or, if faiss is installed, from the added index.
+4. Run the F0 model, shift by semitones (`2^(semitones/12)`), and quantize to bins 1..=255 between 50 Hz and 1100 Hz.
+5. On unvoiced frames, mix the converted features back toward the original by the `protect` amount (default 0.33).
+6. Run the synthesizer, resample to the playback rate, match loudness with `rms_mix` (default 0.25), and crossfade the block join (`crossfade_ms`, default 10).
 
-Retrieval against a faiss index is not applied in-process yet. `index_rate` is stored on the manifest and the trainer still builds the index. A missing file, or a build without the `onnx` feature, keeps the audio path open and labels the voice as passthrough.
+A missing file, or a build without the `onnx` feature, keeps the audio path open and labels the voice as passthrough.
+
+The audio thread uses a rubato slip resampler when capture and playback share a nominal rate, and a polynomial async resampler when they do not. Both nudge the ratio from the playback-ring fill so the two clocks can drift without a growing underrun. When the device publishes a buffer-size range, the callback quantum is the Settings value `callback frames` (default 480, which is 10 ms at 48 kHz). That is the WASAPI shared-mode buffer. Devices that do not publish a range keep the default period.
 
 ## What was borrowed
 
@@ -170,16 +216,11 @@ RVC's own tree also documents LGPL FFmpeg builds and other tools used by its Web
 
 ## What is left
 
-Roughly a third of a finished app is here: the window, the realtime plumbing, the training launch protocol, the GPU budget, and the ONNX session boundary.
+The training path, the ONNX export, the live DSP, the drift resampler, and the duty-cycle benchmark are wired. What this repository cannot do by itself is run them on an RTX 5070: that needs the RVC weights, a CUDA 12.8 runtime, and a listen test.
 
-Still to do before it converts a voice on a 5070 while a game is running:
+Still open:
 
-- Export a trained RVC checkpoint, ContentVec, and RMVPE to the ONNX files the hook loads, and verify the graphs on `sm_120`.
-- Measure the duty cycle on an RTX 5070 and tighten the block size until Task Manager stays near 5% during a game.
-- Apply the faiss index in the live feature path.
-- RMS mix, formant shift, consonant protection, and a noise gate.
-- Overlap-add inside the model hook so block edges do not click once the synthesizer is real.
-- A clock-drift resampler kept on the audio thread, instead of building a new FFT plan when the two devices disagree.
-- WASAPI shared-mode buffer tuning, and a check that the cable's mix format matches the capture rate.
-- An installer that documents VB-CABLE without bundling it.
-- A real end-to-end training run against a checkout, then a listen test.
+- Confirm `export_onnx.py` traces the current WebUI's Transformers HuBERT and the generator on your machine. A trace error is printed and the `.pth` is still saved.
+- Run `--benchmark --voice YourVoice` during a game and, if the duty cycle is over 5%, lengthen the block or switch inference to CPU.
+- Formant shift, a noise gate, and an installer.
+- Very large retrieval banks. The live search is exact and fine for a few thousand rows; it is not an IVF index.
