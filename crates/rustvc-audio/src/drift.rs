@@ -1,13 +1,4 @@
-//! Clock-drift correction on the audio thread.
-//!
-//! Capture and playback devices do not share a clock. When their nominal
-//! rates match, a rubato `Slip` resampler inserts or drops a single frame
-//! occasionally so the playback ring stays near its target fill. When the
-//! rates differ, a polynomial `Async` resampler does the rate change and the
-//! same fill feedback nudges the ratio by about one percent.
-//!
-//! The fast path is still a copy when the rates match and the ring is healthy,
-//! so a passthrough block is not filtered unless the clocks have actually drifted.
+//! Correct capture/playback clock drift with rubato. Equal rates use `Slip`. Different rates use `Async`.
 
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Adjustable, Async, FixedAsync, PolynomialDegree, Resampler, Slip};

@@ -1,8 +1,4 @@
-//! The live voice hook.
-//!
-//! `process` always returns device-rate audio of the same length the engine
-//! expects. A missing checkpoint stays on passthrough and says so in `label`,
-//! so a game session keeps working while a voice is only half set up.
+//! Selected voice. Missing weights pass audio through.
 
 #[cfg(feature = "onnx")]
 use rustvc_audio::BlockResampler;

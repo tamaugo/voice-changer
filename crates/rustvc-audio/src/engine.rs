@@ -1,9 +1,4 @@
-//! Device I/O and the capture -> process -> playback loop.
-//!
-//! Capture and playback callbacks only move samples. Conversion runs on a
-//! dedicated thread so a slow processor cannot stall the WASAPI callback.
-//! On Windows, cpal's default host is WASAPI. Point playback at a virtual
-//! cable's input endpoint and other apps see the far end as a microphone.
+//! Capture, process, and playback. On Windows, cpal uses WASAPI.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};

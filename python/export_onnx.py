@@ -1,27 +1,7 @@
 #!/usr/bin/env python3
-"""Export a trained RVC voice to the ONNX files the live hook loads.
+"""Export an RVC .pth to content.onnx, f0.onnx, synthesizer.onnx, and features.npy.
 
-This script is original. It does not vendor Retrieval-based Voice Conversion.
-Point ``--rvc-root`` at a checkout of the MIT-licensed WebUI
-
-    https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI
-
-and ``--checkpoint`` at the ``.pth`` that training just wrote. The script
-imports that checkout, loads its HuBERT/ContentVec weights, its RMVPE
-checkpoint, and the trained generator, then writes:
-
-    content.onnx       16 kHz waveform -> content features
-    f0.onnx            16 kHz waveform -> fundamental frequency in hertz
-    synthesizer.onnx   phone, phone_lengths, pitch, pitchf, ds -> waveform
-    features.npy       optional retrieval bank, when training left total_fea.npy
-
-Run it from any directory:
-
-    python export_onnx.py --rvc-root D:\\rvc --checkpoint D:\\rvc\\assets\\weights\\demo.pth --out-dir voices\\demo --version v2 --name demo
-
-Blackwell (RTX 5070, sm_120) needs the same CUDA 12.8+ PyTorch wheel as training.
-Export itself runs on CPU so the ONNX graph is a full-precision graph the live
-runtime can execute in FP32 or with the CUDA provider.
+Imports the MIT RVC WebUI at --rvc-root. Does not vendor that repo.
 """
 
 from __future__ import annotations
@@ -134,13 +114,7 @@ def export_content(model, version: str, path: Path, torch, nn) -> None:
 
 
 def export_f0(rmvpe, path: Path, torch, nn) -> None:
-    """Waveform to hertz.
-
-    The mel filter is the basis already built by the RMVPE checkpoint's
-    extractor. The cent bins are the 360-bin encoding that checkpoint emits
-    (20 cents apart, starting at 1997.379). The local average is written here
-    so the graph returns hertz instead of a salience map.
-    """
+    """16 kHz waveform to hertz. Uses the RMVPE mel basis and 360 cent bins."""
 
     class F0(nn.Module):
         def __init__(self, rmvpe):

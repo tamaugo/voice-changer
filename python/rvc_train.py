@@ -1,22 +1,8 @@
 #!/usr/bin/env python3
-"""Launch the MIT-licensed RVC training CLI as a subprocess.
+"""Run the RVC WebUI training CLI, then export_onnx.py.
 
-This file is original. It does not import Retrieval-based Voice Conversion.
-When ``--rvc-root`` points at a checkout of
-
-    https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI
-
-the stages below are the CLI documented in that repo's ``docs/en/cli.md``:
-
-    train/preprocess.py
-    train/dataset/extract_f0.py
-    train/dataset/extract_hubert_feature.py
-    train/train.py
-    train/train_index.py
-
-``--dry-run`` checks the dataset and writes a voice manifest without touching
-a GPU. The Rust UI speaks the ``PROGRESS`` / ``LOG`` / ``VOICE`` / ``ERROR``
-protocol printed here.
+Prints PROGRESS, LOG, VOICE, and ERROR lines for the Rust UI.
+--dry-run writes a manifest and does not train.
 """
 
 from __future__ import annotations

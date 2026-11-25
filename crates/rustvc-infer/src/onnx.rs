@@ -1,20 +1,8 @@
-//! ONNX Runtime backend. Compiled only with `--features onnx`.
+//! ONNX Runtime sessions. Compiled with `--features onnx`. Load the DLL from `ORT_DYLIB_PATH`.
+//! CUDA 12.8+ is required for RTX 5070 (`sm_120`).
 //!
-//! The runtime library is loaded at startup (`load-dynamic`), so this crate
-//! does not link ONNX Runtime or CUDA at build time. Point `ORT_DYLIB_PATH`
-//! or the settings field at an ONNX Runtime build made with CUDA 12.8 or
-//! newer. That is the first CUDA release with native sm_120 kernels for the
-//! RTX 5070. A 12.2 build will fall back or fail on Blackwell.
-//!
-//! Expected files next to a voice (names follow the RVC `net_g.infer` inputs
-//! from the MIT WebUI: phone, lengths, pitch, pitchf, speaker):
-//!
-//! * `content.onnx` — 16 kHz waveform in, content features out (256-d v1 or 768-d v2)
-//! * `f0.onnx` — 16 kHz waveform in, fundamental frequency in hertz out
-//! * `synthesizer.onnx` — the RVC generator
-//!
-//! Retrieval uses `features.npy` when the exporter wrote one. It is a
-//! brute-force neighbour blend, not a faiss index scan.
+//! `content.onnx`: 16 kHz waveform to features. `f0.onnx`: 16 kHz waveform to hertz.
+//! `synthesizer.onnx`: `phone`, `phone_lengths`, `pitch`, `pitchf`, `ds` to audio.
 
 use std::path::{Path, PathBuf};
 

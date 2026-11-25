@@ -1,13 +1,4 @@
-//! Inference interface for live voice conversion.
-//!
-//! The live path is a [`VoiceModel`] installed as the audio engine's processor.
-//! Until ONNX sessions for the content encoder, F0 model, and synthesizer are
-//! present, the model reports why and passes audio through unchanged.
-//!
-//! The stage order follows the RVC v1/v2 contract published by the MIT-licensed
-//! Retrieval-based Voice Conversion WebUI: 16 kHz content features, optional
-//! retrieval blend, F0 in hertz plus a coarse 1..=255 bin, then the
-//! synthesizer. so-vits-svc and the unlicensed obs-rvc tree are not linked.
+//! Live voice conversion. Missing ONNX files pass audio through.
 
 mod bench;
 mod budget;

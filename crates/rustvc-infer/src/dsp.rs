@@ -1,9 +1,4 @@
-//! Streaming helpers around the synthesizer.
-//!
-//! These are original. The shapes follow the RVC live contract: content
-//! frames are blended with a retrieved neighbour, unvoiced frames keep more
-//! of the original features (consonant protection), and the waveform is
-//! crossfaded and loudness-matched before it is played.
+//! Crossfade, loudness match, consonant protection, and neighbour retrieval.
 
 /// Length-preserving crossfade. The start of each new block is blended with
 /// the end of the previous block. A constant signal is unchanged.

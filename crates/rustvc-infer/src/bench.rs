@@ -1,9 +1,4 @@
-//! Offline duty-cycle measurement.
-//!
-//! Run this on the RTX 5070 with a voice whose ONNX files are loaded. The
-//! number is inference time divided by the audio block. It is the upper bound
-//! on average GPU use if the burst fills the chip; a small network usually
-//! lands lower in Task Manager.
+//! Time `process` and compare it with the live GPU budget.
 
 use std::time::Instant;
 
