@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: dtolnay/rust-toolchain@1.100.0
+      - name: Build
+        run: cargo build -p voice-changer --release --features onnx
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $dst = "$env:TEMP\innosetup.exe"
+          Invoke-WebRequest -Uri "https://jrsoftware.org/download.php/is.exe" -OutFile $dst
+          Start-Process $dst -ArgumentList "/VERYSILENT /NORESTART /SUPPRESSMSGBOXES" -Wait
+          $iscc = @(
+            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "ISCC.exe was not installed" }
+          Set-Content -Path "$env:RUNNER_TEMP\iscc.txt" -Value $iscc
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          $iscc = Get-Content "$env:RUNNER_TEMP\iscc.txt"
+          & $iscc "installer\lark.iss"
+      - name: Attach to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/installer/Lark-Setup.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

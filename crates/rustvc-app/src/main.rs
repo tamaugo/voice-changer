@@ -3,7 +3,11 @@
 //! The window has four actions: pick a voice, train a voice, settings, and
 //! close. Audio starts on launch when a capture and playback device exist.
 
+mod brand;
+mod catalog;
+mod setup;
 mod ui;
+mod update;
 
 use std::fs;
 use std::path::PathBuf;
@@ -17,7 +21,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "voice-changer\n  --self-test       run the offline audio, pitch, and training checks\n  --list-devices    print capture and playback devices\n  --benchmark       time the live hook and print the GPU duty cycle\n  --voice NAME      voice to benchmark (default: Passthrough)\n  --seconds N       benchmark length in seconds (default: 3)"
+            "Lark\n  --self-test       run the offline audio, pitch, and training checks\n  --list-devices    print capture and playback devices\n  --benchmark       time the live hook and print the GPU duty cycle\n  --voice NAME      voice to benchmark (default: Passthrough)\n  --seconds N       benchmark length in seconds (default: 3)"
         );
         return;
     }

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: rustfmt
+      - run: cargo test --workspace
+
+  installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: dtolnay/rust-toolchain@1.100.0
+      - name: Build
+        run: cargo build -p voice-changer --release --features onnx
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $dst = "$env:TEMP\innosetup.exe"
+          Invoke-WebRequest -Uri "https://jrsoftware.org/download.php/is.exe" -OutFile $dst
+          Start-Process $dst -ArgumentList "/VERYSILENT /NORESTART /SUPPRESSMSGBOXES" -Wait
+          $iscc = @(
+            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "ISCC.exe was not installed" }
+          Set-Content -Path "$env:RUNNER_TEMP\iscc.txt" -Value $iscc
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          $iscc = Get-Content "$env:RUNNER_TEMP\iscc.txt"
+          & $iscc "installer\lark.iss"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Lark-Setup
+          path: target/installer/Lark-Setup.exe
