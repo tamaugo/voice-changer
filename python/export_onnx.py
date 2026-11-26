@@ -138,16 +138,17 @@ def export_f0(rmvpe, path: Path, torch, nn) -> None:
                 win_length=self.win,
                 window=window,
                 center=True,
-                return_complex=True,
+                return_complex=False,
             )
-            mel = torch.matmul(self.mel_basis, spectrum.abs())
+            magnitude = torch.sqrt(spectrum[..., 0] ** 2 + spectrum[..., 1] ** 2)
+            mel = torch.matmul(self.mel_basis, magnitude)
             mel = torch.log(torch.clamp(mel, min=self.clamp))
             frames = mel.shape[-1]
             pad = (32 - frames % 32) % 32
             if pad:
                 mel = torch.nn.functional.pad(mel, (0, pad))
             hidden = self.net(mel)
-            hidden = hidden[:, :frames]
+            hidden = hidden[0, :frames]
             return decode_hz(hidden, self.cents)
 
     module = F0(rmvpe).eval()
@@ -184,8 +185,87 @@ def decode_hz(hidden, cents):
     return torch.where(decoded <= 0, torch.zeros_like(f0), f0)
 
 
+def _patch_relative_attention(net, torch) -> int:
+    """Swap RVC's relative-position helpers for gather-based versions.
+
+    The stock helpers call int()/max() on the sequence length, which the ONNX
+    tracer freezes to the example length. These versions compute the same
+    values from torch.arange on traced sizes, so the graph stays dynamic.
+    """
+    import types
+
+    def get_relative_embeddings(self, relative_embeddings, length):
+        window = self.window_size
+        positions = torch.arange(2 * length - 1, device=relative_embeddings.device) - (length - 1)
+        index = torch.clamp(positions + window, 0, 2 * window)
+        mask = (positions.abs() <= window).to(relative_embeddings.dtype)
+        return relative_embeddings[:, index] * mask.view(1, -1, 1)
+
+    def relative_to_absolute(self, x):
+        batch, heads, length = x.size(0), x.size(1), x.size(2)
+        rows = torch.arange(length, device=x.device)
+        index = rows.view(1, -1) - rows.view(-1, 1) + (length - 1)
+        index = index.view(1, 1, length, length).expand(batch, heads, length, length)
+        return torch.gather(x, 3, index)
+
+    def absolute_to_relative(self, x):
+        batch, heads, length = x.size(0), x.size(1), x.size(2)
+        rows = torch.arange(length, device=x.device)
+        offsets = torch.arange(2 * length - 1, device=x.device) - (length - 1)
+        columns = rows.view(-1, 1) + offsets.view(1, -1)
+        valid = ((columns >= 0) & (columns < length)).to(x.dtype)
+        index = torch.clamp(columns, 0, length - 1)
+        index = index.view(1, 1, length, 2 * length - 1).expand(batch, heads, length, 2 * length - 1)
+        return torch.gather(x, 3, index) * valid.view(1, 1, length, 2 * length - 1)
+
+    patched = 0
+    for module in net.modules():
+        if getattr(module, "window_size", None) is not None and hasattr(module, "_relative_position_to_absolute_position"):
+            module._get_relative_embeddings = types.MethodType(get_relative_embeddings, module)
+            module._relative_position_to_absolute_position = types.MethodType(relative_to_absolute, module)
+            module._absolute_position_to_relative_position = types.MethodType(absolute_to_relative, module)
+            patched += 1
+    return patched
+
+
+def _check_patch(stock, net, use_f0: bool, feature_dim: int, torch, style: str) -> None:
+    """Compare patched and stock attention on a few lengths before export."""
+    for frames in (7, 33, 100):
+        torch.manual_seed(frames)
+        phone = torch.randn(1, frames, feature_dim)
+        lengths = torch.tensor([frames], dtype=torch.long)
+        pitch = torch.randint(1, 255, (1, frames), dtype=torch.long)
+        pitchf = torch.full((1, frames), 150.0)
+        speaker = torch.zeros(1, dtype=torch.long)
+        outputs = []
+        for model in (stock, net):
+            torch.manual_seed(0)
+            with torch.no_grad():
+                if use_f0 and style == "realtime":
+                    out = model.infer(phone, lengths, pitch, pitchf, speaker, 0, frames, frames)[0]
+                elif use_f0:
+                    out = model.infer(phone, lengths, pitch, pitchf, speaker)[0]
+                elif style == "realtime":
+                    out = model.infer(phone, lengths, speaker, 0, frames, frames)[0]
+                else:
+                    out = model.infer(phone, lengths, speaker)[0]
+            outputs.append(out)
+        diff = (outputs[0] - outputs[1]).abs().max().item()
+        emit("LOG", f"patched attention check at {frames} frames: max diff {diff:.2e}")
+        if diff > 1e-3:
+            raise RuntimeError(f"patched attention differs from stock RVC by {diff} at {frames} frames")
+
+
 def export_synthesizer(net, use_f0: bool, feature_dim: int, path: Path, torch, nn) -> None:
     style = "realtime" if _accepts_realtime_infer(net, use_f0, feature_dim, torch) else "simple"
+    import copy
+
+    stock = copy.deepcopy(net).eval()
+    patched = _patch_relative_attention(net, torch)
+    emit("LOG", f"patched {patched} relative attention layer(s) for dynamic length")
+    if patched:
+        _check_patch(stock, net, use_f0, feature_dim, torch, style)
+    del stock
     emit("LOG", f"synthesizer call style: {style}")
 
     class Synthesizer(nn.Module):
