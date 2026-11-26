@@ -138,6 +138,32 @@ pub fn retrieve(features: &mut [f32], bank: &FeatureBank, index_rate: f32, k: us
     }
     let frames = features.len() / dim;
     let neighbours = k.min(bank.row_count()).max(1);
+    // Each frame is independent, so large banks are split across cores.
+    // Small banks stay on the calling thread to skip the spawn cost.
+    let workers = if bank.row_count() * frames < 200_000 {
+        1
+    } else {
+        std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1)
+            .min(frames)
+            .max(1)
+    };
+    if workers == 1 {
+        retrieve_frames(features, bank, rate, neighbours);
+        return;
+    }
+    let frames_per_worker = frames.div_ceil(workers);
+    std::thread::scope(|scope| {
+        for chunk in features.chunks_mut(frames_per_worker * dim) {
+            scope.spawn(move || retrieve_frames(chunk, bank, rate, neighbours));
+        }
+    });
+}
+
+fn retrieve_frames(features: &mut [f32], bank: &FeatureBank, rate: f32, neighbours: usize) {
+    let dim = bank.dim();
+    let frames = features.len() / dim;
     let mut mixed = vec![0.0f32; dim];
     let mut scored: Vec<(f32, usize)> = Vec::with_capacity(bank.row_count());
     for frame in 0..frames {
@@ -147,11 +173,16 @@ pub fn retrieve(features: &mut [f32], bank: &FeatureBank, index_rate: f32, k: us
         for row in 0..bank.row_count() {
             scored.push((squared_distance(query, bank.row(row)), row));
         }
-        scored.sort_by(|left, right| {
+        // Only the k nearest are used, so select them instead of sorting the
+        // whole bank (tens of thousands of rows for a long dataset).
+        let by_distance = |left: &(f32, usize), right: &(f32, usize)| {
             left.0
                 .partial_cmp(&right.0)
                 .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        };
+        if neighbours < scored.len() {
+            scored.select_nth_unstable_by(neighbours - 1, by_distance);
+        }
         mixed.fill(0.0);
         let mut weight_sum = 0.0f32;
         for (distance, row) in scored.iter().take(neighbours) {
@@ -172,14 +203,28 @@ pub fn retrieve(features: &mut [f32], bank: &FeatureBank, index_rate: f32, k: us
     }
 }
 
+/// Eight independent accumulators so the compiler can vectorise the loop. A
+/// single running `sum()` forces strictly ordered float adds, which keeps it
+/// scalar, and retrieval runs this once per bank row per frame.
 fn squared_distance(left: &[f32], right: &[f32]) -> f32 {
-    left.iter()
-        .zip(right)
-        .map(|(a, b)| {
-            let delta = a - b;
-            delta * delta
-        })
-        .sum()
+    const LANES: usize = 8;
+    let mut acc = [0.0f32; LANES];
+    let chunks = left.len() / LANES * LANES;
+    for (a, b) in left[..chunks]
+        .chunks_exact(LANES)
+        .zip(right[..chunks].chunks_exact(LANES))
+    {
+        for lane in 0..LANES {
+            let delta = a[lane] - b[lane];
+            acc[lane] += delta * delta;
+        }
+    }
+    let mut total: f32 = acc.iter().sum();
+    for (a, b) in left[chunks..].iter().zip(&right[chunks..]) {
+        let delta = a - b;
+        total += delta * delta;
+    }
+    total
 }
 
 #[cfg(test)]
@@ -220,6 +265,24 @@ mod tests {
         protect_features(&mut converted, &original, &[100.0, 0.0], 2, 0.0);
         assert_eq!(&converted[..2], &[1.0, 1.0]);
         assert_eq!(&converted[2..], &[0.5, 0.5]);
+    }
+
+    #[test]
+    fn threaded_retrieval_matches_single_thread() {
+        let dim = 16;
+        let mut seed = 7u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32
+        };
+        let rows: Vec<f32> = (0..20_000 * dim).map(|_| next()).collect();
+        let bank = FeatureBank::from_rows(dim, rows).unwrap();
+        let input: Vec<f32> = (0..40 * dim).map(|_| next()).collect();
+        let mut threaded = input.clone();
+        retrieve(&mut threaded, &bank, 0.75, 8);
+        let mut single = input;
+        retrieve_frames(&mut single, &bank, 0.75, 8);
+        assert_eq!(threaded, single);
     }
 
     #[test]
