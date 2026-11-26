@@ -53,6 +53,10 @@ pub fn classify_clip(section: &str, name: &str, duration_secs: Option<f32>) -> C
     ClipDecision::Keep
 }
 
+pub fn caption_is_speech(caption: &str) -> bool {
+    is_speech(&caption.replace("''", ""))
+}
+
 fn is_speech(name: &str) -> bool {
     let spoken = spoken_text(name);
     let spoken = spoken.trim();

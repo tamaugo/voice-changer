@@ -5,6 +5,7 @@
 
 mod brand;
 mod catalog;
+mod clips;
 mod setup;
 mod ui;
 mod update;

@@ -73,7 +73,7 @@ ONNX Runtime 1.26 GPU is the CUDA 12.8 / cuDNN 9 build. In Settings, set Python 
 
 The window is Lark. Four actions: Pick a voice, Train a voice, Settings, Close. Update is the small button on the home screen.
 
-Clips committed in `voices/<Name>/samples/` show up under Train a voice. Train uses the checked files and writes the model into that folder.
+Train a voice lists `voices/<Name>/`. If `source.toml` is there and the clips are not on this PC yet, Download clips fetches the speech files into `samples/`. Train uses the checked files and writes the model into that same folder.
 
 Set the app output device to `CABLE Input`. In Discord, set the microphone to `CABLE Output`.
 

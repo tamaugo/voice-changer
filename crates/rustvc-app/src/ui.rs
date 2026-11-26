@@ -17,6 +17,7 @@ use rustvc_train::{find_script, TrainEvent, TrainHandle, TrainRequest};
 use serde::{Deserialize, Serialize};
 
 use crate::brand::{self, Logo};
+use crate::clips::{self, ClipEvent, ClipHandle};
 use crate::setup::{self, SetupEvent, SetupHandle, SetupPaths};
 use crate::update::{self, UpdateEvent, UpdateHandle};
 
@@ -141,6 +142,11 @@ struct VoiceApp {
     update_log: String,
     update_error: Option<String>,
     restart: bool,
+    clip_job: Option<ClipHandle>,
+    clip_progress: f32,
+    clip_message: String,
+    clip_log: String,
+    clip_error: Option<String>,
 }
 
 struct SelectableVoice {
@@ -198,6 +204,11 @@ impl VoiceApp {
             update_log: String::new(),
             update_error: None,
             restart: false,
+            clip_job: None,
+            clip_progress: 0.0,
+            clip_message: String::new(),
+            clip_log: String::new(),
+            clip_error: None,
         };
         app.refresh_repo_voices();
         app
@@ -495,6 +506,62 @@ impl VoiceApp {
         }
     }
 
+    fn poll_clips(&mut self) {
+        let events = {
+            let Some(job) = &self.clip_job else {
+                return;
+            };
+            let mut events = Vec::new();
+            while let Some(event) = job.poll() {
+                events.push(event);
+            }
+            events
+        };
+        let mut finished = false;
+        for event in events {
+            match event {
+                ClipEvent::Progress { fraction, message } => {
+                    self.clip_progress = fraction;
+                    self.clip_message = message;
+                }
+                ClipEvent::Log(line) => {
+                    self.clip_log.push_str(&line);
+                    self.clip_log.push('\n');
+                }
+                ClipEvent::Finished(result) => {
+                    finished = true;
+                    match result {
+                        Ok(summary) => {
+                            self.clip_progress = 1.0;
+                            self.clip_message =
+                                format!("{} saved, {} skipped", summary.saved, summary.skipped);
+                            self.clip_error = None;
+                            self.refresh_repo_voices();
+                        }
+                        Err(err) => {
+                            self.clip_error = Some(err);
+                            self.refresh_repo_voices();
+                        }
+                    }
+                }
+            }
+        }
+        if finished {
+            self.clip_job = None;
+        }
+    }
+
+    fn start_clip_download(&mut self, directory: PathBuf) {
+        if self.clip_job.is_some() {
+            return;
+        }
+        self.clip_error = None;
+        self.clip_log.clear();
+        self.clip_progress = 0.0;
+        self.clip_message = "Starting".to_string();
+        self.clip_job = Some(clips::start(directory));
+    }
+
     fn start_setup(&mut self) {
         if self.setup_job.is_some() {
             return;
@@ -536,12 +603,14 @@ impl eframe::App for VoiceApp {
         self.poll_training();
         self.poll_setup();
         self.poll_update();
+        self.poll_clips();
         if self.restart {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if self.job.is_some()
             || self.setup_job.is_some()
             || self.update_job.is_some()
+            || self.clip_job.is_some()
             || self.engine.status().running
         {
             ctx.request_repaint_after(Duration::from_millis(200));
@@ -680,6 +749,7 @@ impl VoiceApp {
                 ui.label(egui::RichText::new("No voices/<Name>/samples folders yet.").color(MUTED));
             }
             let mut select: Option<String> = None;
+            let mut download: Option<PathBuf> = None;
             for item in &mut self.repo_voices {
                 let tag = if item.voice.trained {
                     "trained"
@@ -693,7 +763,14 @@ impl VoiceApp {
                 {
                     select = Some(item.voice.name.clone());
                 }
-                if chosen {
+                if chosen && item.voice.samples.is_empty() && item.voice.has_source {
+                    if ui
+                        .add_enabled(self.clip_job.is_none(), egui::Button::new("Download clips"))
+                        .clicked()
+                    {
+                        download = Some(item.voice.directory.clone());
+                    }
+                } else if chosen {
                     for (clip, checked) in item.voice.samples.iter().zip(item.checked.iter_mut()) {
                         ui.push_id(&clip.path, |ui| {
                             ui.horizontal(|ui| {
@@ -719,6 +796,27 @@ impl VoiceApp {
             }
             if let Some(name) = select {
                 self.selected_repo = Some(name);
+            }
+            if let Some(directory) = download {
+                self.start_clip_download(directory);
+            }
+            if self.clip_job.is_some() || !self.clip_message.is_empty() {
+                ui.add_space(8.0);
+                ui.add(
+                    egui::ProgressBar::new(self.clip_progress)
+                        .text(if self.clip_message.is_empty() {
+                            "Waiting"
+                        } else {
+                            self.clip_message.as_str()
+                        })
+                        .desired_width(520.0),
+                );
+                if let Some(error) = &self.clip_error {
+                    ui.label(egui::RichText::new(error).color(ERROR));
+                }
+                if !self.clip_log.is_empty() {
+                    job_log(ui, &self.clip_log);
+                }
             }
             ui.add_space(16.0);
             ui.label(egui::RichText::new("Or a folder").color(MUTED));
