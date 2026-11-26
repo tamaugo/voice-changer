@@ -8,6 +8,7 @@ mod model;
 #[cfg_attr(not(feature = "onnx"), allow(dead_code))]
 mod npy;
 mod pitch;
+mod samples;
 mod voices;
 
 #[cfg(feature = "onnx")]
@@ -17,6 +18,7 @@ pub use bench::{measure_duty, DutyReport};
 pub use budget::{duty_cycle_percent, GpuBudget};
 pub use model::{InferDevice, VoiceModel};
 pub use pitch::{coarse_f0, shift_hz};
+pub use samples::{resolve_voices_dir, scan_repo_voices, stage_selected, RepoVoice, SampleClip};
 pub use voices::{load_voices, VoiceManifest, VoiceRecord};
 
 use rustvc_audio::SampleProcessor;

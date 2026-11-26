@@ -65,6 +65,8 @@ ONNX Runtime 1.26 GPU is the CUDA 12.8 / cuDNN 9 build. In Settings, set Python 
 
 The window has four actions: Pick a voice, Train a voice, Settings, Close.
 
+`git pull`, then Train a voice. Clips committed in `voices/<Name>/samples/` are listed there; Train uses the checked files and writes the model into that folder. See `voices/README.md`.
+
 Set the app output device to `CABLE Input`. In Discord, set the microphone to `CABLE Output`.
 
 Train with dry run off, or export a checkpoint you already have:

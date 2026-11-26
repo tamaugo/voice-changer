@@ -1,9 +1,13 @@
 /target
 **/*.rs.bk
 voice-changer.toml
-voices/**
-!voices/.gitkeep
+voices/**/*.onnx
+voices/**/*.pth
+voices/**/*.npy
+voices/**/*.index
+voices/**/voice.toml
 *.wav
+!voices/**/samples/*.wav
 .venv
 __pycache__/
 *.pyc

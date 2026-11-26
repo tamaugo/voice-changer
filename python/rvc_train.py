@@ -35,6 +35,13 @@ def fail(message: str) -> None:
     sys.exit(1)
 
 
+def voice_destination(voices_dir: Path, name: str) -> Path:
+    exact = voices_dir / name
+    if exact.is_dir():
+        return exact
+    return voices_dir / name.replace(" ", "_")
+
+
 def count_audio(dataset: Path) -> int:
     return sum(1 for path in dataset.iterdir() if path.suffix.lower() in AUDIO_SUFFIXES)
 
@@ -51,7 +58,7 @@ def write_manifest(
     f0_model: str = "",
     features: str = "",
 ) -> Path:
-    destination = voices_dir / name.replace(" ", "_")
+    destination = voice_destination(voices_dir, name)
     destination.mkdir(parents=True, exist_ok=True)
 
     def local_name(source: str) -> str:
