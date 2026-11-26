@@ -1,9 +1,9 @@
 name = "Rem"
 page = "https://deadlock.wiki/Rem/Voice_lines"
-file_base = "https://cdn.deadlock.wiki"
 min_seconds = 0.3
 speaker = "Rem"
 skip_sections = [
+  "Lil Helpers",
   "Efforts",
   "Pain",
   "Other Characters",

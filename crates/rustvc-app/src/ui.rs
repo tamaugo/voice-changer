@@ -533,8 +533,10 @@ impl VoiceApp {
                     match result {
                         Ok(summary) => {
                             self.clip_progress = 1.0;
-                            self.clip_message =
-                                format!("{} saved, {} skipped", summary.saved, summary.skipped);
+                            self.clip_message = format!(
+                                "{} downloaded, {} skipped",
+                                summary.saved, summary.skipped
+                            );
                             self.clip_error = None;
                             self.refresh_repo_voices();
                         }
@@ -750,6 +752,8 @@ impl VoiceApp {
             }
             let mut select: Option<String> = None;
             let mut download: Option<PathBuf> = None;
+            let mut clear: Option<PathBuf> = None;
+            let mut cancel = false;
             for item in &mut self.repo_voices {
                 let tag = if item.voice.trained {
                     "trained"
@@ -763,14 +767,34 @@ impl VoiceApp {
                 {
                     select = Some(item.voice.name.clone());
                 }
-                if chosen && item.voice.samples.is_empty() && item.voice.has_source {
-                    if ui
-                        .add_enabled(self.clip_job.is_none(), egui::Button::new("Download clips"))
-                        .clicked()
-                    {
-                        download = Some(item.voice.directory.clone());
-                    }
-                } else if chosen {
+                if chosen && item.voice.has_source {
+                    ui.horizontal(|ui| {
+                        if item.voice.samples.is_empty()
+                            && ui
+                                .add_enabled(
+                                    self.clip_job.is_none(),
+                                    egui::Button::new("Download clips"),
+                                )
+                                .clicked()
+                        {
+                            download = Some(item.voice.directory.clone());
+                        }
+                        if !item.voice.samples.is_empty()
+                            && ui
+                                .add_enabled(
+                                    self.clip_job.is_none(),
+                                    egui::Button::new("Clear downloaded clips"),
+                                )
+                                .clicked()
+                        {
+                            clear = Some(item.voice.directory.clone());
+                        }
+                        if self.clip_job.is_some() && ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                }
+                if chosen && !item.voice.samples.is_empty() {
                     for (clip, checked) in item.voice.samples.iter().zip(item.checked.iter_mut()) {
                         ui.push_id(&clip.path, |ui| {
                             ui.horizontal(|ui| {
@@ -799,6 +823,22 @@ impl VoiceApp {
             }
             if let Some(directory) = download {
                 self.start_clip_download(directory);
+            }
+            if cancel {
+                if let Some(job) = &self.clip_job {
+                    job.cancel();
+                }
+            }
+            if let Some(directory) = clear {
+                match clips::clear_downloaded(&directory) {
+                    Ok(count) => {
+                        self.clip_error = None;
+                        self.clip_message = format!("Cleared {count} clips");
+                        self.clip_log = self.clip_message.clone();
+                        self.refresh_repo_voices();
+                    }
+                    Err(err) => self.clip_error = Some(err),
+                }
             }
             if self.clip_job.is_some() || !self.clip_message.is_empty() {
                 ui.add_space(8.0);
