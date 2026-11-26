@@ -1,0 +1,30 @@
+[package]
+name = "rustvc-infer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "Voice-conversion interface, GPU budget, and optional ONNX Runtime backend."
+
+[features]
+default = []
+# Loads ONNX Runtime at runtime (no compile-time link) and enables the CUDA
+# execution provider API. The CUDA toolkit is not required to compile this
+# feature. A CUDA 12.8+ ONNX Runtime build is required at runtime for
+# Blackwell (sm_120).
+onnx = ["dep:ort", "dep:ndarray"]
+
+[dependencies]
+rustvc-audio = { path = "../rustvc-audio" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "0.9"
+ort = { version = "=2.0.0-rc.15", optional = true, default-features = false, features = [
+    "std",
+    "ndarray",
+    "load-dynamic",
+    "cuda",
+    "api-31",
+] }
+ndarray = { version = "0.17", optional = true }

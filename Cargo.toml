@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rustvc-audio",
+    "crates/rustvc-infer",
+    "crates/rustvc-train",
+    "crates/rustvc-app",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+publish = false
+rust-version = "1.87"
