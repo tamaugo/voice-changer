@@ -1,0 +1,38 @@
+{
+  "batchcomplete": "",
+  "query": {
+    "normalized": [
+      {
+        "from": "File:familiar_match_start_familiar_atlas_convo01_01.mp3",
+        "to": "File:Familiar match start familiar atlas convo01 01.mp3"
+      }
+    ],
+    "pages": {
+      "-1": {
+        "ns": 6,
+        "title": "File:Missing clip.mp3",
+        "missing": ""
+      },
+      "29700": {
+        "pageid": 29700,
+        "ns": 6,
+        "title": "File:Familiar select 01.mp3",
+        "imageinfo": [
+          {
+            "url": "https://cdn.deadlock.wiki/Familiar_select_01.mp3"
+          }
+        ]
+      },
+      "95623": {
+        "pageid": 95623,
+        "ns": 6,
+        "title": "File:Familiar match start familiar atlas convo01 01.mp3",
+        "imageinfo": [
+          {
+            "url": "https://cdn.deadlock.wiki/Familiar_match_start_familiar_atlas_convo01_01.mp3"
+          }
+        ]
+      }
+    }
+  }
+}
