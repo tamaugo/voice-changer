@@ -12,6 +12,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt
+      - name: Install audio and window libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
       - run: cargo test --workspace
 
   installer:
@@ -27,7 +31,7 @@ jobs:
         shell: pwsh
         run: |
           $dst = "$env:TEMP\innosetup.exe"
-          Invoke-WebRequest -Uri "https://jrsoftware.org/download.php/is.exe" -OutFile $dst
+          Invoke-WebRequest -Uri "https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-6.7.4.exe" -OutFile $dst
           Start-Process $dst -ArgumentList "/VERYSILENT /NORESTART /SUPPRESSMSGBOXES" -Wait
           $iscc = @(
             "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
