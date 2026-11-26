@@ -114,6 +114,10 @@ fn init_environment(
     device: InferDevice,
     onnx_dll: Option<&Path>,
 ) -> Result<ort::environment::Environment, String> {
+    let env_dll = std::env::var_os("ORT_DYLIB_PATH").map(std::path::PathBuf::from);
+    if let Some(dir) = onnx_dll.or(env_dll.as_deref()).and_then(Path::parent) {
+        prepend_to_path(dir);
+    }
     let builder = if let Some(path) = onnx_dll {
         if !path.is_file() {
             return Err(format!(
@@ -125,15 +129,32 @@ fn init_environment(
     } else {
         ort::init()
     };
-    let builder = match device {
-        InferDevice::Cpu => builder,
-        InferDevice::Cuda { device_id } => {
-            builder.with_execution_providers([cuda_provider(device_id)])
-        }
-    };
+    // CUDA is registered per session in open_session. Registering it on the
+    // environment as well makes ONNX Runtime reject the session with
+    // "Provider CUDAExecutionProvider has already been registered".
+    let _ = device;
     builder.build().map_err(|err| {
         format!("ONNX Runtime init failed: {err}. Set ORT_DYLIB_PATH to onnxruntime.dll")
     })
+}
+
+/// The CUDA provider loads cuDNN with a plain LoadLibrary call, which searches
+/// PATH but not the provider's own folder. Setup puts the CUDA 13 and cuDNN
+/// DLLs next to onnxruntime.dll, so that folder has to be on PATH.
+fn prepend_to_path(dir: &Path) {
+    if dir.as_os_str().is_empty() {
+        return;
+    }
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    if std::env::split_paths(&current).any(|entry| entry == dir) {
+        return;
+    }
+    let joined = std::env::join_paths(
+        std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&current)),
+    );
+    if let Ok(joined) = joined {
+        std::env::set_var("PATH", joined);
+    }
 }
 
 fn cuda_provider(device_id: i32) -> ort::ep::ExecutionProviderDispatch {

@@ -8,6 +8,7 @@ Prints PROGRESS, LOG, VOICE, and ERROR lines for the Rust UI.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -148,11 +149,36 @@ def pretrained_paths(root: Path, version: str, sr_tag: str, f0: bool) -> tuple[P
     return generator, discriminator
 
 
+def ensure_ffmpeg(root: Path) -> None:
+    """RVC's audio loader shells out to `ffmpeg`. Put one on PATH if missing."""
+    if shutil.which("ffmpeg"):
+        return
+    try:
+        import imageio_ffmpeg
+    except ImportError:
+        fail(
+            "ffmpeg was not found. Install it (winget install -e --id Gyan.FFmpeg) "
+            "or run: python -m pip install imageio-ffmpeg"
+        )
+    source = Path(imageio_ffmpeg.get_ffmpeg_exe())
+    folder = root / ".lark-bin"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+    if not target.is_file() or target.stat().st_size != source.stat().st_size:
+        shutil.copy2(source, target)
+    os.environ["PATH"] = str(folder) + os.pathsep + os.environ.get("PATH", "")
+    emit("LOG", f"using ffmpeg from {target}")
+
+
 def run_step(root: Path, args: list[str]) -> None:
     emit("LOG", " ".join(args))
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONIOENCODING"] = "utf-8"
     process = subprocess.Popen(
         args,
         cwd=root,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -164,7 +190,7 @@ def run_step(root: Path, args: list[str]) -> None:
             emit("LOG", stripped)
     code = process.wait()
     if code != 0:
-        fail(f"{Path(args[1]).name} exited with status {code}")
+        fail(f"{Path(args[2] if args[1] == "-m" else args[1]).name} exited with status {code}")
 
 
 def newest(paths: list[Path]) -> Path | None:
@@ -181,7 +207,8 @@ def find_checkpoint(root: Path, name: str) -> Path | None:
     logs = root / "logs" / name
     if not logs.is_dir():
         return None
-    return newest(list(logs.rglob("*.pth")))
+    generators = list(logs.rglob("G_*.pth"))
+    return newest(generators or [p for p in logs.rglob("*.pth") if not p.name.startswith("D_")])
 
 
 def find_index(root: Path, name: str) -> Path | None:
@@ -191,6 +218,37 @@ def find_index(root: Path, name: str) -> Path | None:
             candidates.extend(folder.rglob("*.index"))
     added = [path for path in candidates if "added" in path.name]
     return newest(added or candidates)
+
+
+def prepare_training(root: Path, safe_name: str, sr_tag: str, version: str, f0: bool, speaker_id: int = 0) -> None:
+    """Write filelist.txt and config.json like the RVC WebUI does before train.py."""
+    import json
+
+    exp = root / "logs" / safe_name
+    gt = exp / "0_gt_wavs"
+    feat = exp / ("3_feature256" if version == "v1" else "3_feature768")
+    f0_dir = exp / "2a_f0"
+    f0nsf = exp / "2b-f0nsf"
+    names = {p.name.split(".")[0] for p in gt.iterdir()} & {p.name.split(".")[0] for p in feat.iterdir()}
+    if f0:
+        names &= {p.name.split(".")[0] for p in f0_dir.iterdir()}
+        names &= {p.name.split(".")[0] for p in f0nsf.iterdir()}
+    if not names:
+        fail("preprocessing produced no usable clips (check the log above; ffmpeg must be on PATH)")
+    lines = []
+    for name in sorted(names):
+        if f0:
+            lines.append(f"{gt / (name + '.wav')}|{feat / (name + '.npy')}|{f0_dir / (name + '.wav.npy')}|{f0nsf / (name + '.wav.npy')}|{speaker_id}")
+        else:
+            lines.append(f"{gt / (name + '.wav')}|{feat / (name + '.npy')}|{speaker_id}")
+    lines = [line.replace("\\", "\\\\") for line in lines]
+    (exp / "filelist.txt").write_text("\n".join(lines), encoding="utf8")
+    config_rel = f"v1/{sr_tag}.json" if version == "v1" or sr_tag == "40k" else f"v2/{sr_tag}.json"
+    config_path = exp / "config.json"
+    if not config_path.is_file():
+        data = json.loads((root / "configs" / config_rel).read_text(encoding="utf8"))
+        config_path.write_text(json.dumps(data, ensure_ascii=False, indent=4, sort_keys=True) + "\n", encoding="utf8")
+    emit("LOG", f"training list has {len(lines)} clip(s)")
 
 
 def train(args: argparse.Namespace) -> None:
@@ -238,6 +296,7 @@ def train(args: argparse.Namespace) -> None:
     if root is None or not (root / "train" / "train.py").is_file():
         fail("set the RVC checkout path to a clone of Retrieval-based-Voice-Conversion-WebUI (train/train.py was not found)")
 
+    ensure_ffmpeg(root)
     check_blackwell(args.gpu)
     generator, discriminator = pretrained_paths(root, args.version, sr_tag, args.f0)
     if not generator.is_file() or not discriminator.is_file():
@@ -252,12 +311,15 @@ def train(args: argparse.Namespace) -> None:
     f0_flag = "1" if args.f0 else "0"
     half = "true"
 
+    (root / experiment).mkdir(parents=True, exist_ok=True)
+    (root / "assets" / "weights").mkdir(parents=True, exist_ok=True)
+    (root / "assets" / "indices").mkdir(parents=True, exist_ok=True)
     progress(0.05, "preprocess dataset")
     run_step(
         root,
         [
             python,
-            "train/preprocess.py",
+            "-m", "train.preprocess",
             str(dataset),
             str(args.sample_rate),
             str(args.workers),
@@ -273,7 +335,7 @@ def train(args: argparse.Namespace) -> None:
             root,
             [
                 python,
-                "train/dataset/extract_f0.py",
+                "-m", "train.dataset.extract_f0",
                 "cuda",
                 "1",
                 "0",
@@ -288,7 +350,7 @@ def train(args: argparse.Namespace) -> None:
         root,
         [
             python,
-            "train/dataset/extract_hubert_feature.py",
+            "-m", "train.dataset.extract_hubert_feature",
             f"cuda:{args.gpu}",
             "1",
             "0",
@@ -299,13 +361,14 @@ def train(args: argparse.Namespace) -> None:
         ],
     )
 
+    prepare_training(root, safe_name, sr_tag, args.version, args.f0)
     progress(0.60, "train generator")
     save_every = 5 if args.epochs >= 5 else 1
     run_step(
         root,
         [
             python,
-            "train/train.py",
+            "-m", "train.train",
             "-e",
             safe_name,
             "-sr",
@@ -340,7 +403,7 @@ def train(args: argparse.Namespace) -> None:
         root,
         [
             python,
-            "train/train_index.py",
+            "-m", "train.train_index",
             safe_name,
             args.version,
             "assets/indices",
@@ -398,9 +461,13 @@ def export_checkpoint(root: Path, checkpoint: Path, voice_dir: Path, version: st
         "--f0" if f0 else "--no-f0",
     ]
     emit("LOG", " ".join(command))
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONIOENCODING"] = "utf-8"
     process = subprocess.Popen(
         command,
         cwd=root,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

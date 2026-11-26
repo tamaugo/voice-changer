@@ -14,8 +14,18 @@ pub const GIT_URL: &str =
     "https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.2/Git-2.47.1.2-64-bit.exe";
 pub const GIT_LFS_URL: &str =
     "https://github.com/git-lfs/git-lfs/releases/download/v3.6.1/git-lfs-windows-v3.6.1.exe";
+/// ort 2.0.0-rc.15 refuses ONNX Runtime older than 1.31.
+pub const ORT_VERSION: &str = "1.31.1";
 pub const ORT_URL: &str =
-    "https://globalcdn.nuget.org/packages/microsoft.ml.onnxruntime.gpu.windows.1.26.0.nupkg";
+    "https://globalcdn.nuget.org/packages/microsoft.ml.onnxruntime.gpu.windows.1.31.1.nupkg";
+/// The ONNX Runtime 1.31 CUDA provider links against CUDA 13 (cublas64_13.dll)
+/// and cuDNN 9. NVIDIA ships these as pip wheels, so no toolkit install is needed.
+pub const CUDA_WHEELS: &[&str] = &[
+    "nvidia-cublas>=13,<14",
+    "nvidia-cuda-runtime>=13,<14",
+    "nvidia-cudnn-cu13>=9,<10",
+    "nvidia-cufft>=12,<13",
+];
 pub const VBCABLE_URL: &str =
     "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack46.zip";
 pub const RVC_REPO: &str =
@@ -54,7 +64,7 @@ pub const STEPS: &[Step] = &[
     },
     Step {
         id: "onnx",
-        label: "ONNX Runtime GPU 1.26",
+        label: "ONNX Runtime GPU 1.31 and CUDA 13 runtime",
     },
     Step {
         id: "cable",
@@ -268,22 +278,49 @@ fn install_windows(
         let req = requirements.to_string_lossy().to_string();
         run_cmd(&venv_python, &["-m", "pip", "install", "-r", &req], tx)?;
     }
+    // onnx is needed by export_onnx.py; imageio-ffmpeg gives rvc_train.py an
+    // ffmpeg binary for RVC's audio loader when none is on PATH.
+    run_cmd(
+        &venv_python,
+        &["-m", "pip", "install", "onnx", "imageio-ffmpeg"],
+        tx,
+    )?;
 
     step(tx, 5, "RVC model files");
     download_models(&rvc, tx)?;
 
-    step(tx, 6, "ONNX Runtime GPU 1.26");
+    step(tx, 6, "ONNX Runtime GPU 1.31 and CUDA 13 runtime");
     let dll = paths.onnx_dll();
-    if !dll.is_file() {
-        let nupkg = downloads.join("onnxruntime.nupkg");
+    let onnx_dir = paths.root.join("onnx");
+    let marker = onnx_dir.join("lark-ort-version.txt");
+    let current = fs::read_to_string(&marker).unwrap_or_default();
+    if !dll.is_file() || current.trim() != ORT_VERSION {
+        let nupkg = downloads.join(format!("onnxruntime-{ORT_VERSION}.nupkg"));
         fetch(ORT_URL, &nupkg, tx)?;
-        let unpacked = downloads.join("onnxruntime");
+        let unpacked = downloads.join(format!("onnxruntime-{ORT_VERSION}"));
         extract_zip(&nupkg, &unpacked)?;
         let found = find_file(&unpacked, "onnxruntime.dll")
             .ok_or("onnxruntime.dll was not in the package")?;
         if let Some(dir) = found.parent() {
-            copy_dir_files(dir, &paths.root.join("onnx"))?;
+            copy_dir_files(dir, &onnx_dir)?;
         }
+        // The CUDA provider DLL resolves its CUDA dependencies from its own
+        // folder, so the runtime DLLs go next to onnxruntime.dll.
+        let cuda = paths.root.join("cuda13");
+        let cuda_arg = cuda.to_string_lossy().to_string();
+        let mut args = vec![
+            "-m",
+            "pip",
+            "install",
+            "--no-deps",
+            "--upgrade",
+            "--target",
+            &cuda_arg,
+        ];
+        args.extend_from_slice(CUDA_WHEELS);
+        run_cmd(&venv_python, &args, tx)?;
+        copy_dlls_recursive(&cuda, &onnx_dir)?;
+        fs::write(&marker, ORT_VERSION).map_err(|err| err.to_string())?;
     }
 
     step(tx, 7, "VB-CABLE");
@@ -568,6 +605,25 @@ fn copy_dir_files(from: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn copy_dlls_recursive(from: &Path, to: &Path) -> Result<(), String> {
+    fs::create_dir_all(to).map_err(|err| err.to_string())?;
+    for entry in fs::read_dir(from).map_err(|err| err.to_string())? {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let path = entry.path();
+        if path.is_dir() {
+            copy_dlls_recursive(&path, to)?;
+        } else if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("dll"))
+        {
+            fs::copy(&path, to.join(entry.file_name())).map_err(|err| err.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,7 +652,10 @@ mod tests {
     fn urls_pin_the_windows_versions() {
         assert!(PYTHON_URL.contains("python-3.12.8"));
         assert!(GIT_URL.contains("Git-2.47.1.2-64-bit.exe"));
-        assert!(ORT_URL.contains("1.26.0"));
+        assert!(ORT_URL.contains(ORT_VERSION));
+        assert!(CUDA_WHEELS
+            .iter()
+            .any(|wheel| wheel.starts_with("nvidia-cublas>=13")));
         assert!(VBCABLE_URL.contains("VBCABLE_Driver_Pack46.zip"));
         assert!(RVC_REPO.contains("Retrieval-based-Voice-Conversion-WebUI"));
     }
