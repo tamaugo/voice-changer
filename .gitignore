@@ -6,8 +6,8 @@ voices/**/*.pth
 voices/**/*.npy
 voices/**/*.index
 voices/**/voice.toml
+voices/**/samples/**
 *.wav
-!voices/**/samples/*.wav
 .venv
 __pycache__/
 *.pyc

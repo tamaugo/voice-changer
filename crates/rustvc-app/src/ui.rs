@@ -16,6 +16,11 @@ use rustvc_infer::{
 use rustvc_train::{find_script, TrainEvent, TrainHandle, TrainRequest};
 use serde::{Deserialize, Serialize};
 
+use crate::brand::{self, Logo};
+use crate::clips::{self, ClipEvent, ClipHandle};
+use crate::setup::{self, SetupEvent, SetupHandle, SetupPaths};
+use crate::update::{self, UpdateEvent, UpdateHandle};
+
 const BG: egui::Color32 = egui::Color32::from_rgb(16, 17, 20);
 const TEXT: egui::Color32 = egui::Color32::from_rgb(232, 228, 220);
 const MUTED: egui::Color32 = egui::Color32::from_rgb(154, 150, 140);
@@ -31,6 +36,8 @@ enum Screen {
     Pick,
     Train,
     Settings,
+    Setup,
+    Update,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +56,7 @@ struct AppConfig {
     python: String,
     voices_dir: String,
     selected_voice: String,
+    setup_done: bool,
 }
 
 impl Default for AppConfig {
@@ -67,6 +75,7 @@ impl Default for AppConfig {
             python: default_python(),
             voices_dir: "voices".to_string(),
             selected_voice: "Passthrough".to_string(),
+            setup_done: false,
         }
     }
 }
@@ -121,6 +130,23 @@ struct VoiceApp {
     voices_root: PathBuf,
     repo_voices: Vec<SelectableVoice>,
     selected_repo: Option<String>,
+    logo: egui::TextureHandle,
+    setup_job: Option<SetupHandle>,
+    setup_progress: f32,
+    setup_message: String,
+    setup_log: String,
+    setup_error: Option<String>,
+    update_job: Option<UpdateHandle>,
+    update_progress: f32,
+    update_message: String,
+    update_log: String,
+    update_error: Option<String>,
+    restart: bool,
+    clip_job: Option<ClipHandle>,
+    clip_progress: f32,
+    clip_message: String,
+    clip_log: String,
+    clip_error: Option<String>,
 }
 
 struct SelectableVoice {
@@ -131,6 +157,12 @@ struct SelectableVoice {
 impl VoiceApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_theme(&cc.egui_ctx);
+        let logo_image = Logo::load();
+        let logo = cc.egui_ctx.load_texture(
+            "lark-logo",
+            logo_image.color_image(),
+            egui::TextureOptions::LINEAR,
+        );
         let config = load_config();
         let voices_root = voices_root_from(&config);
         let _ = fs::create_dir_all(&voices_root);
@@ -141,7 +173,11 @@ impl VoiceApp {
         form.dry_run = config.rvc_root.trim().is_empty();
         form.gpu = config.cuda_device.max(0) as u32;
         let mut app = Self {
-            screen: Screen::Dashboard,
+            screen: if config.setup_done {
+                Screen::Dashboard
+            } else {
+                Screen::Setup
+            },
             config,
             devices,
             voices,
@@ -156,6 +192,23 @@ impl VoiceApp {
             voices_root,
             repo_voices: Vec::new(),
             selected_repo: None,
+            logo,
+            setup_job: None,
+            setup_progress: 0.0,
+            setup_message: String::new(),
+            setup_log: String::new(),
+            setup_error: None,
+            update_job: None,
+            update_progress: 0.0,
+            update_message: String::new(),
+            update_log: String::new(),
+            update_error: None,
+            restart: false,
+            clip_job: None,
+            clip_progress: 0.0,
+            clip_message: String::new(),
+            clip_log: String::new(),
+            clip_error: None,
         };
         app.refresh_repo_voices();
         app
@@ -357,6 +410,190 @@ impl VoiceApp {
             Err(err) => self.train_error = Some(err.to_string()),
         }
     }
+
+    fn poll_setup(&mut self) {
+        let events = {
+            let Some(job) = &self.setup_job else {
+                return;
+            };
+            let mut events = Vec::new();
+            while let Some(event) = job.poll() {
+                events.push(event);
+            }
+            events
+        };
+        let mut finished = false;
+        for event in events {
+            match event {
+                SetupEvent::Progress { fraction, message } => {
+                    self.setup_progress = fraction;
+                    self.setup_message = message;
+                }
+                SetupEvent::Log(line) => {
+                    self.setup_log.push_str(&line);
+                    self.setup_log.push('\n');
+                }
+                SetupEvent::Finished(result) => {
+                    finished = true;
+                    match result {
+                        Ok(done) => {
+                            self.setup_progress = 1.0;
+                            self.setup_message = "Finished".to_string();
+                            self.config.python = done.python;
+                            self.config.rvc_root = done.rvc_root;
+                            self.config.onnx_dll = done.onnx_dll;
+                            self.config.setup_done = true;
+                            self.setup_error = None;
+                            save_config(&self.config);
+                        }
+                        Err(err) => self.setup_error = Some(err),
+                    }
+                }
+            }
+        }
+        if finished {
+            self.setup_job = None;
+        }
+    }
+
+    fn poll_update(&mut self) {
+        let events = {
+            let Some(job) = &self.update_job else {
+                return;
+            };
+            let mut events = Vec::new();
+            while let Some(event) = job.poll() {
+                events.push(event);
+            }
+            events
+        };
+        let mut finished = false;
+        let mut restart = false;
+        for event in events {
+            match event {
+                UpdateEvent::Progress { fraction, message } => {
+                    self.update_progress = fraction;
+                    self.update_message = message;
+                }
+                UpdateEvent::Log(line) => {
+                    self.update_log.push_str(&line);
+                    self.update_log.push('\n');
+                }
+                UpdateEvent::Voices(dir) => {
+                    self.config.voices_dir = dir.display().to_string();
+                    save_config(&self.config);
+                    self.reload_voices();
+                }
+                UpdateEvent::Restart => restart = true,
+                UpdateEvent::Finished(result) => {
+                    finished = true;
+                    if let Err(err) = result {
+                        self.update_error = Some(err);
+                    } else if self.update_error.is_none() {
+                        self.update_progress = 1.0;
+                        if self.update_message.is_empty() {
+                            self.update_message = "Finished".to_string();
+                        }
+                    }
+                }
+            }
+        }
+        if finished {
+            self.update_job = None;
+        }
+        if restart {
+            self.restart = true;
+        }
+    }
+
+    fn poll_clips(&mut self) {
+        let events = {
+            let Some(job) = &self.clip_job else {
+                return;
+            };
+            let mut events = Vec::new();
+            while let Some(event) = job.poll() {
+                events.push(event);
+            }
+            events
+        };
+        let mut finished = false;
+        for event in events {
+            match event {
+                ClipEvent::Progress { fraction, message } => {
+                    self.clip_progress = fraction;
+                    self.clip_message = message;
+                }
+                ClipEvent::Log(line) => {
+                    self.clip_log.push_str(&line);
+                    self.clip_log.push('\n');
+                }
+                ClipEvent::Finished(result) => {
+                    finished = true;
+                    match result {
+                        Ok(summary) => {
+                            self.clip_progress = 1.0;
+                            self.clip_message =
+                                format!("{} saved, {} skipped", summary.saved, summary.skipped);
+                            self.clip_error = None;
+                            self.refresh_repo_voices();
+                        }
+                        Err(err) => {
+                            self.clip_error = Some(err);
+                            self.refresh_repo_voices();
+                        }
+                    }
+                }
+            }
+        }
+        if finished {
+            self.clip_job = None;
+        }
+    }
+
+    fn start_clip_download(&mut self, directory: PathBuf) {
+        if self.clip_job.is_some() {
+            return;
+        }
+        self.clip_error = None;
+        self.clip_log.clear();
+        self.clip_progress = 0.0;
+        self.clip_message = "Starting".to_string();
+        self.clip_job = Some(clips::start(directory));
+    }
+
+    fn start_setup(&mut self) {
+        if self.setup_job.is_some() {
+            return;
+        }
+        self.setup_error = None;
+        self.setup_log.clear();
+        self.setup_progress = 0.0;
+        self.setup_message = "Starting".to_string();
+        let cable = self
+            .devices
+            .outputs
+            .iter()
+            .chain(self.devices.inputs.iter())
+            .any(|name| name.to_ascii_lowercase().contains("cable"));
+        self.setup_job = Some(setup::start(SetupPaths::new(), cable));
+    }
+
+    fn start_update(&mut self) {
+        if self.update_job.is_some() {
+            return;
+        }
+        self.update_error = None;
+        self.update_log.clear();
+        self.update_progress = 0.0;
+        self.update_message = "Checking GitHub".to_string();
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("voice-changer"));
+        self.update_job = Some(update::start(
+            brand::version().to_string(),
+            self.voices_root.clone(),
+            exe,
+        ));
+    }
 }
 
 impl eframe::App for VoiceApp {
@@ -364,7 +601,18 @@ impl eframe::App for VoiceApp {
         let ctx = ui.ctx().clone();
         apply_theme(&ctx);
         self.poll_training();
-        if self.job.is_some() || self.engine.status().running {
+        self.poll_setup();
+        self.poll_update();
+        self.poll_clips();
+        if self.restart {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if self.job.is_some()
+            || self.setup_job.is_some()
+            || self.update_job.is_some()
+            || self.clip_job.is_some()
+            || self.engine.status().running
+        {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
         let status = self.engine.status();
@@ -384,15 +632,37 @@ impl eframe::App for VoiceApp {
             Screen::Pick => self.pick(ui),
             Screen::Train => self.train(ui),
             Screen::Settings => self.settings(ui),
+            Screen::Setup => self.setup(ui),
+            Screen::Update => self.update_page(ui),
         });
     }
 }
 
 impl VoiceApp {
     fn dashboard(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("Update").size(14.0).color(MUTED),
+                    ))
+                    .clicked()
+                {
+                    self.screen = Screen::Update;
+                    self.start_update();
+                }
+                ui.label(
+                    egui::RichText::new(format!("{} {}", brand::APP_NAME, brand::version()))
+                        .size(14.0)
+                        .color(MUTED),
+                );
+            });
+        });
         ui.vertical_centered(|ui| {
-            ui.add_space(48.0);
-            ui.label(egui::RichText::new("voice-changer").size(40.0).color(TEXT));
+            ui.add_space(24.0);
+            ui.add(egui::Image::from_texture(&self.logo).fit_to_exact_size(egui::vec2(84.0, 84.0)));
+            ui.add_space(12.0);
+            ui.label(egui::RichText::new(brand::APP_NAME).size(40.0).color(TEXT));
             ui.add_space(6.0);
             ui.label(
                 egui::RichText::new("Real-time voice conversion")
@@ -479,6 +749,7 @@ impl VoiceApp {
                 ui.label(egui::RichText::new("No voices/<Name>/samples folders yet.").color(MUTED));
             }
             let mut select: Option<String> = None;
+            let mut download: Option<PathBuf> = None;
             for item in &mut self.repo_voices {
                 let tag = if item.voice.trained {
                     "trained"
@@ -492,7 +763,14 @@ impl VoiceApp {
                 {
                     select = Some(item.voice.name.clone());
                 }
-                if chosen {
+                if chosen && item.voice.samples.is_empty() && item.voice.has_source {
+                    if ui
+                        .add_enabled(self.clip_job.is_none(), egui::Button::new("Download clips"))
+                        .clicked()
+                    {
+                        download = Some(item.voice.directory.clone());
+                    }
+                } else if chosen {
                     for (clip, checked) in item.voice.samples.iter().zip(item.checked.iter_mut()) {
                         ui.push_id(&clip.path, |ui| {
                             ui.horizontal(|ui| {
@@ -518,6 +796,27 @@ impl VoiceApp {
             }
             if let Some(name) = select {
                 self.selected_repo = Some(name);
+            }
+            if let Some(directory) = download {
+                self.start_clip_download(directory);
+            }
+            if self.clip_job.is_some() || !self.clip_message.is_empty() {
+                ui.add_space(8.0);
+                ui.add(
+                    egui::ProgressBar::new(self.clip_progress)
+                        .text(if self.clip_message.is_empty() {
+                            "Waiting"
+                        } else {
+                            self.clip_message.as_str()
+                        })
+                        .desired_width(520.0),
+                );
+                if let Some(error) = &self.clip_error {
+                    ui.label(egui::RichText::new(error).color(ERROR));
+                }
+                if !self.clip_log.is_empty() {
+                    job_log(ui, &self.clip_log);
+                }
             }
             ui.add_space(16.0);
             ui.label(egui::RichText::new("Or a folder").color(MUTED));
@@ -691,6 +990,10 @@ impl VoiceApp {
                 ui.end_row();
             });
         ui.add_space(12.0);
+        if ui.button("Set up dependencies").clicked() {
+            self.screen = Screen::Setup;
+        }
+        ui.add_space(8.0);
         if ui.button("Save and restart audio").clicked() {
             self.config.gpu_budget_percent = self.config.gpu_budget_percent.clamp(1, 100);
             self.reload_voices();
@@ -717,6 +1020,104 @@ impl VoiceApp {
         );
         });
     }
+
+    fn setup(&mut self, ui: &mut egui::Ui) {
+        if page_header(ui, "Setup") {
+            self.screen = Screen::Dashboard;
+            return;
+        }
+        ui.label(
+            egui::RichText::new(
+                "Installs Git, Git LFS, Python 3.12, the RVC checkout and model files, ONNX Runtime GPU 1.26, and launches the VB-CABLE installer.",
+            )
+            .color(MUTED),
+        );
+        ui.add_space(12.0);
+        for step in setup::STEPS {
+            ui.label(format!("· {}", step.label));
+        }
+        ui.add_space(12.0);
+        let running = self.setup_job.is_some();
+        if ui
+            .add_enabled(!running, egui::Button::new("Install"))
+            .clicked()
+        {
+            self.start_setup();
+        }
+        ui.add_space(8.0);
+        if ui.button("Continue").clicked() {
+            self.screen = Screen::Dashboard;
+        }
+        ui.add_space(12.0);
+        ui.add(
+            egui::ProgressBar::new(self.setup_progress)
+                .text(if self.setup_message.is_empty() {
+                    "Waiting"
+                } else {
+                    self.setup_message.as_str()
+                })
+                .desired_width(520.0),
+        );
+        if let Some(error) = &self.setup_error {
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new(error).color(ERROR));
+        }
+        ui.add_space(8.0);
+        job_log(ui, &self.setup_log);
+    }
+
+    fn update_page(&mut self, ui: &mut egui::Ui) {
+        if page_header(ui, "Update") {
+            self.screen = Screen::Dashboard;
+            return;
+        }
+        ui.label(
+            egui::RichText::new(format!(
+                "{} {} checks GitHub, downloads the installer, updates voices, and restarts.",
+                brand::APP_NAME,
+                brand::version()
+            ))
+            .color(MUTED),
+        );
+        ui.add_space(12.0);
+        if self.update_job.is_none() && ui.button("Check again").clicked() {
+            self.start_update();
+        }
+        ui.add_space(12.0);
+        ui.add(
+            egui::ProgressBar::new(self.update_progress)
+                .text(if self.update_message.is_empty() {
+                    "Waiting"
+                } else {
+                    self.update_message.as_str()
+                })
+                .desired_width(520.0),
+        );
+        if let Some(error) = &self.update_error {
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new(error).color(ERROR));
+        }
+        ui.add_space(8.0);
+        job_log(ui, &self.update_log);
+    }
+}
+
+fn job_log(ui: &mut egui::Ui, log: &str) {
+    egui::ScrollArea::vertical()
+        .max_height(220.0)
+        .stick_to_bottom(true)
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(if log.is_empty() {
+                    "Progress will show up here."
+                } else {
+                    log
+                })
+                .family(egui::FontFamily::Monospace)
+                .size(13.0)
+                .color(MUTED),
+            );
+        });
 }
 
 fn run_benchmark(config: &AppConfig, voices: &[VoiceRecord]) -> String {
@@ -749,16 +1150,18 @@ fn run_benchmark(config: &AppConfig, voices: &[VoiceRecord]) -> String {
 }
 
 pub fn run() -> eframe::Result<()> {
+    let logo = Logo::load();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([980.0, 700.0])
-            .with_min_inner_size([860.0, 620.0])
-            .with_title("voice-changer"),
+            .with_inner_size([980.0, 720.0])
+            .with_min_inner_size([860.0, 640.0])
+            .with_title(brand::APP_NAME)
+            .with_icon(logo.icon()),
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
     eframe::run_native(
-        "voice-changer",
+        brand::APP_NAME,
         options,
         Box::new(|cc| Ok(Box::new(VoiceApp::new(cc)))),
     )

@@ -1,2 +1,2 @@
-`voices/<Name>/samples/` holds the clips (wav, flac, mp3, ogg, m4a, aac). Keep each file under 50 MB. These files are Git LFS (`git lfs install` once).
+`voices/<Name>/source.toml` names the page and filters. Download clips on the Train screen saves audio in `voices/<Name>/samples/` on this PC. Those files stay untracked.
 Train a voice lists each folder. Untrained means there is no model file yet. Train writes the model into that same folder.

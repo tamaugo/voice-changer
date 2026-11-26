@@ -1,8 +1,16 @@
-# voice-changer
+# Lark
 
 Real-time voice conversion for Windows. Rust app, MIT license. Training and ONNX export call the MIT-licensed [RVC WebUI](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI). `obs-rvc` has no license and so-vits-svc is AGPL-3.0; neither is included. VB-CABLE is donationware and is not bundled.
 
-## Install (PowerShell)
+## Install
+
+Download `Lark-Setup.exe` from the GitHub Releases page and run it. The first window installs Git, Git LFS, Python 3.12, the RVC checkout and model files, and ONNX Runtime GPU 1.26, then launches the VB-CABLE installer. Reboot after the driver. The home screen is Pick a voice, Train a voice, Settings, and Close. Update is the small button at the top of the home screen.
+
+Set the app output to `CABLE Input`. In Discord, set the microphone to `CABLE Output`.
+
+`git pull` is the Update button. It also refreshes `voices/<Name>/samples/`, including Git LFS audio. See `voices/README.md`.
+
+## Source build
 
 Run the Visual Studio and VB-CABLE steps from an elevated PowerShell. Open a new PowerShell after the `winget` block so `cargo` and `py` are on `PATH`.
 
@@ -63,9 +71,9 @@ ONNX Runtime 1.26 GPU is the CUDA 12.8 / cuDNN 9 build. In Settings, set Python 
 
 ## Usage
 
-The window has four actions: Pick a voice, Train a voice, Settings, Close.
+The window is Lark. Four actions: Pick a voice, Train a voice, Settings, Close. Update is the small button on the home screen.
 
-`git pull`, then Train a voice. Clips committed in `voices/<Name>/samples/` are listed there; Train uses the checked files and writes the model into that folder. See `voices/README.md`.
+Train a voice lists `voices/<Name>/`. If `source.toml` is there and the clips are not on this PC yet, Download clips fetches the speech files into `samples/`. Train uses the checked files and writes the model into that same folder.
 
 Set the app output device to `CABLE Input`. In Discord, set the microphone to `CABLE Output`.
 

@@ -20,6 +20,8 @@ pub struct RepoVoice {
     pub directory: PathBuf,
     pub samples: Vec<SampleClip>,
     pub trained: bool,
+    /// `source.toml` is present, so clips can be downloaded onto this PC.
+    pub has_source: bool,
 }
 
 pub fn is_audio_file(path: &Path) -> bool {
@@ -73,11 +75,13 @@ pub fn scan_repo_voices(root: &Path) -> Vec<RepoVoice> {
             continue;
         }
         let samples = list_samples(&directory.join("samples"));
-        if samples.is_empty() {
+        let has_source = directory.join("source.toml").is_file();
+        if samples.is_empty() && !has_source {
             continue;
         }
         voices.push(RepoVoice {
             trained: has_trained_model(&directory),
+            has_source,
             name,
             directory,
             samples,
@@ -224,6 +228,20 @@ mod tests {
         assert!(ada.trained);
         assert!(!bea.trained);
         assert_eq!(voices[0].name, "Bea");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn source_manifest_lists_a_voice_with_no_samples() {
+        let root = std::env::temp_dir().join(format!("rustvc-scan-source-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let rem = root.join("Rem");
+        fs::create_dir_all(&rem).unwrap();
+        fs::write(rem.join("source.toml"), "name = \"Rem\"\n").unwrap();
+        let voices = scan_repo_voices(&root);
+        assert_eq!(voices.len(), 1);
+        assert!(voices[0].has_source);
+        assert!(voices[0].samples.is_empty());
         let _ = fs::remove_dir_all(&root);
     }
 
