@@ -5,6 +5,7 @@
 //! `synthesizer.onnx`: `phone`, `phone_lengths`, `pitch`, `pitchf`, `ds` to audio.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use ndarray::{Array2, Array3, ArrayD};
 use ort::session::Session;
@@ -49,7 +50,7 @@ impl OnnxSessions {
             return Err("f0.onnx is missing (RMVPE export). Uncheck F0 only if the voice was trained without it".into());
         }
 
-        let environment = init_environment(device, onnx_dll)?;
+        let environment = shared_environment(onnx_dll)?;
         let content = open_session(&environment, &content_path, device)?;
         let f0 = match f0_path {
             Some(path) => Some(open_session(&environment, &path, device)?),
@@ -110,10 +111,30 @@ impl OnnxSessions {
     }
 }
 
-fn init_environment(
-    device: InferDevice,
-    onnx_dll: Option<&Path>,
-) -> Result<ort::environment::Environment, String> {
+/// ort allows one environment per process and remembers the first one only
+/// weakly: once it is dropped, every later `build()` fails with "only one
+/// environment is allowed per process". Keep one alive for the whole process
+/// and share it, so loading a second voice or restarting audio works.
+///
+/// A failed init is not cached, so fixing the DLL path in Settings can be
+/// retried. A successful one is: switching to a different onnxruntime.dll
+/// needs an app restart.
+fn shared_environment(onnx_dll: Option<&Path>) -> Result<ort::environment::Environment, String> {
+    static SHARED: OnceLock<ort::environment::Environment> = OnceLock::new();
+    static INIT: Mutex<()> = Mutex::new(());
+    if let Some(environment) = SHARED.get() {
+        return Ok(environment.clone());
+    }
+    let _guard = INIT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(environment) = SHARED.get() {
+        return Ok(environment.clone());
+    }
+    let environment = init_environment(onnx_dll)?;
+    let _ = SHARED.set(environment.clone());
+    Ok(environment)
+}
+
+fn init_environment(onnx_dll: Option<&Path>) -> Result<ort::environment::Environment, String> {
     let env_dll = std::env::var_os("ORT_DYLIB_PATH").map(std::path::PathBuf::from);
     if let Some(dir) = onnx_dll.or(env_dll.as_deref()).and_then(Path::parent) {
         prepend_to_path(dir);
@@ -132,7 +153,6 @@ fn init_environment(
     // CUDA is registered per session in open_session. Registering it on the
     // environment as well makes ONNX Runtime reject the session with
     // "Provider CUDAExecutionProvider has already been registered".
-    let _ = device;
     builder.build().map_err(|err| {
         format!("ONNX Runtime init failed: {err}. Set ORT_DYLIB_PATH to onnxruntime.dll")
     })
